@@ -1,27 +1,27 @@
-# Painel de Produção — versão organizada
+# Painel de Produção
 
-Esta versão mantém a interface, as regras e a conexão existentes, mas separa o projeto em arquivos menores para facilitar manutenção e crescimento.
+Versão completa e atualizada, preparada para GitHub e publicação automática na Vercel.
 
-## Estrutura
+## Atualizar pelo GitHub Desktop
 
-- `index.html`: estrutura das telas.
-- `assets/styles.css`: aparência e responsividade.
-- `assets/storage.js`: conexão e operações do app_storage.
-- `assets/app.js`: regras do painel, formulários, relatórios e PCP.
-- `painel-producao-versao-estavel.html`: cópia intacta para retorno imediato.
+1. Clone o repositório `ernadesilva02-lang/painel_producao_base_html`.
+2. Extraia este pacote.
+3. Copie todo o conteúdo da pasta extraída para a pasta clonada.
+4. Confirme a substituição dos arquivos.
+5. No GitHub Desktop, crie o commit e clique em **Push origin**.
+6. Aguarde o novo deployment da Vercel ficar **Ready**.
 
-## Como testar
+Não envie as pastas `node_modules` ou `.next`; elas não fazem parte deste pacote.
 
-Abra um terminal nesta pasta e execute um servidor local simples, por exemplo:
+## Desenvolvimento local
 
-`npx serve .`
+```bash
+npm install
+npm run dev
+```
 
-Depois abra o endereço apresentado no navegador. Evite abrir apenas o `index.html` por duplo clique em produção; use hospedagem HTTPS.
+Para validar a versão de produção:
 
-## Segurança — próximo passo
-
-A reorganização não altera as permissões do banco. Antes de disponibilizar o sistema para vários usuários, revisar no Supabase: autenticação, RLS da tabela `app_storage`, políticas por perfil e substituição futura da chave `anon` legada por uma chave publicável. Nunca colocar uma chave `service_role` ou secreta nestes arquivos.
-
-## Retorno
-
-Se qualquer comportamento diferir, use temporariamente `painel-producao-versao-estavel.html`. Os dados permanecem no mesmo banco e não são copiados nem apagados por esta reorganização.
+```bash
+npm run build
+```
