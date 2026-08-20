@@ -11,18 +11,35 @@ type Machine = { id: string; name: string; setor: string };
 type ClosureSnapshot = { responsavel: string; observacao?: string; data: string; pesoInicial: number; pesoFinal: number; perdaReal: number; perdaDeclarada: number; divergencia: number; aproveitamento: number };
 type StatusEvent = { acao: "FECHAMENTO" | "REABERTURA"; data: string; responsavel: string; observacao?: string };
 type DeadlineRule = "LISO" | "IMPRESSO_REPETICAO" | "IMPRESSO_NOVO";
-type Order = { id: string; numeroOp?: string; numeroPedido?: string; data: string; cliente: string; descricaoItem: string; quantidade: string; statusProducao?: string; material?: string; observacao?: string; maquinaId?: string; prioridade?: number; dataConclusao?: string; tipoPrazo?: DeadlineRule; dataChegadaCliche?: string; fechamento?: ClosureSnapshot; historicoStatus?: StatusEvent[] };
+type ProductCategory = "SACO_LISO" | "SACO_IMPRESSO" | "SACO_LAMINADO" | "FILME_LISO" | "FILME_IMPRESSO" | "FILME_LAMINADO" | "NAO_CLASSIFICADO";
+type Order = { id: string; numeroOp?: string; numeroPedido?: string; data: string; cliente: string; descricaoItem: string; quantidade: string; categoriaProduto?: ProductCategory; statusProducao?: string; material?: string; observacao?: string; maquinaId?: string; prioridade?: number; ordemFila?: number; dataConclusao?: string; tipoPrazo?: DeadlineRule; dataChegadaCliche?: string; fechamento?: ClosureSnapshot; historicoStatus?: StatusEvent[] };
 type Production = { id?: string; idPedido?: string; maquinaId?: string; qtdProduzido?: string; dataProducao?: string; turno?: string; operador?: string; aparas?: string; picote?: string; cliente?: string; descricaoItem?: string; material?: string; _key?: string; _updatedAt?: string };
 type Totals = Record<string, number>;
 type RegistryKind = "operadores" | "clientes" | "produtos" | "materiais";
 type RegistryData = Record<RegistryKind, string[]>;
 
 const nav = ["Visão geral", "Central de prazos", "Lançamentos", "Relatório diário", "Painel mensal", "Pedidos / OP", "Programação PCP", "Produção", "Relatórios", "Cadastros"];
+const PRODUCT_CATEGORIES: { value: ProductCategory; label: string }[] = [
+  { value:"SACO_LISO", label:"Saco liso" }, { value:"SACO_IMPRESSO", label:"Saco impresso" }, { value:"SACO_LAMINADO", label:"Saco laminado" },
+  { value:"FILME_LISO", label:"Filme liso" }, { value:"FILME_IMPRESSO", label:"Filme impresso" }, { value:"FILME_LAMINADO", label:"Filme laminado" },
+  { value:"NAO_CLASSIFICADO", label:"Não classificado" },
+];
 
 function json<T>(value: string, fallback: T): T { try { return JSON.parse(value) as T; } catch { return fallback; } }
 function number(value?: string) { if (!value) return 0; const n = value.includes(",") ? value.replace(/\./g, "").replace(",", ".") : value; return Number(n) || 0; }
 function kg(value: number) { return `${value.toLocaleString("pt-BR", { maximumFractionDigits: 2 })} kg`; }
 function date(value?: string) { if (!value) return "—"; const [y,m,d] = value.slice(0,10).split("-"); return y && m && d ? `${d}/${m}/${y}` : value; }
+function inferredCategory(order: Pick<Order,"descricaoItem"|"material"|"tipoPrazo"|"categoriaProduto">): ProductCategory {
+  if (order.categoriaProduto) return order.categoriaProduto;
+  const text = `${order.descricaoItem || ""} ${order.material || ""}`.toLocaleUpperCase("pt-BR");
+  const format = /\bSACO\b/.test(text) ? "SACO" : /\b(FILME|BOBINA)\b/.test(text) ? "FILME" : "";
+  const laminated = /\b(LAM|LAMINADO|BOPP\+|PET\+)\b/.test(text);
+  const printed = /\b(IMP|IMPRESSO|IMPRESSA)\b/.test(text) || order.tipoPrazo?.startsWith("IMPRESSO");
+  if (format === "SACO") return laminated ? "SACO_LAMINADO" : printed ? "SACO_IMPRESSO" : "SACO_LISO";
+  if (format === "FILME") return laminated ? "FILME_LAMINADO" : printed ? "FILME_IMPRESSO" : "FILME_LISO";
+  return "NAO_CLASSIFICADO";
+}
+function categoryLabel(order: Pick<Order,"descricaoItem"|"material"|"tipoPrazo"|"categoriaProduto">) { return PRODUCT_CATEGORIES.find(item => item.value === inferredCategory(order))?.label || "Não classificado"; }
 function addCalendarDays(value:string, days:number) { const result = new Date(`${value}T12:00:00`); result.setDate(result.getDate() + days); return result.toLocaleDateString("en-CA", { timeZone: "America/Fortaleza" }); }
 function deadlineOf(order:Order) {
   const rule = order.tipoPrazo || "IMPRESSO_REPETICAO";
@@ -170,6 +187,9 @@ export default function Home() {
   const [newOrderOpen, setNewOrderOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [pcpView, setPcpView] = useState<"Aguardando" | "Programadas">("Aguardando");
+  const [pcpMachine, setPcpMachine] = useState("Todas");
+  const [pcpCategory, setPcpCategory] = useState<"Todas" | ProductCategory>("Todas");
+  const [pcpSort, setPcpSort] = useState<"Data" | "Manual">("Data");
   const [selectedRecord, setSelectedRecord] = useState<Production | null>(null);
   const [reportMachine, setReportMachine] = useState("Todas");
   const [reportOperator, setReportOperator] = useState("Todos");
@@ -238,12 +258,33 @@ export default function Home() {
     const base = active === "Pedidos / OP" && filter === "Finalizados" ? finishedOrders : activeOrders;
     return base.filter(order => {
       const g = group(order.statusProducao);
-      return (active !== "Programação PCP" || (pcpView === "Aguardando" ? g === "Aguardando" : g !== "Aguardando" && g !== "Finalizado"))
+      return (active !== "Programação PCP" || (pcpView === "Aguardando" ? g === "Aguardando" : g !== "Aguardando" && g !== "Finalizado" && (pcpMachine === "Todas" || order.maquinaId === pcpMachine) && (pcpCategory === "Todas" || inferredCategory(order) === pcpCategory)))
         && (active !== "Produção" || (g === "Em produção" && order.maquinaId && (machineFilter === "Todas" || order.maquinaId === machineFilter)))
         && (filter === "Todos ativos" || filter === "Finalizados" || g === filter)
         && (!term || `${order.id} ${order.numeroPedido || ""} ${order.numeroOp || ""} ${order.cliente} ${order.descricaoItem}`.toLocaleLowerCase("pt-BR").includes(term));
     });
-  }, [activeOrders, finishedOrders, active, filter, query, machineFilter, pcpView]);
+  }, [activeOrders, finishedOrders, active, filter, query, machineFilter, pcpView, pcpMachine, pcpCategory]);
+  const pcpQueue = useMemo(() => visible.slice().sort((a,b) => {
+    const machine = String(a.maquinaId || "").localeCompare(String(b.maquinaId || ""));
+    if (pcpMachine === "Todas" && machine) return machine;
+    if (pcpSort === "Data") {
+      const orderDate = (a.data || "9999-12-31").localeCompare(b.data || "9999-12-31");
+      return orderDate || (a.ordemFila ?? Number.MAX_SAFE_INTEGER) - (b.ordemFila ?? Number.MAX_SAFE_INTEGER) || String(a.numeroPedido || a.id).localeCompare(String(b.numeroPedido || b.id), "pt-BR", { numeric:true });
+    }
+    const position = (a.ordemFila ?? Number.MAX_SAFE_INTEGER) - (b.ordemFila ?? Number.MAX_SAFE_INTEGER);
+    return position || (b.prioridade || 0) - (a.prioridade || 0) || (a.data || "").localeCompare(b.data || "");
+  }), [visible, pcpMachine, pcpSort]);
+  const pcpCategorySummary = useMemo(() => {
+    const grouped = new Map<ProductCategory, { category: ProductCategory; label: string; orders: number; totalKg: number }>();
+    pcpQueue.forEach(order => {
+      const category = inferredCategory(order);
+      const current = grouped.get(category) || { category, label: categoryLabel(order), orders: 0, totalKg: 0 };
+      current.orders += 1;
+      current.totalKg += number(order.quantidade);
+      grouped.set(category, current);
+    });
+    return PRODUCT_CATEGORIES.map(item => grouped.get(item.value)).filter((item): item is NonNullable<typeof item> => Boolean(item));
+  }, [pcpQueue]);
   const metrics = useMemo(() => ({
     active: activeOrders.length,
     producing: activeOrders.filter(o => group(o.statusProducao) === "Em produção").length,
@@ -282,17 +323,20 @@ export default function Home() {
 
   function navigate(item: string) {
     if (!["Visão geral", "Central de prazos", "Lançamentos", "Relatório diário", "Painel mensal", "Pedidos / OP", "Programação PCP", "Produção", "Relatórios", "Cadastros"].includes(item)) return;
-    setActive(item); setFilter("Todos ativos"); setMachineFilter("Todas"); setPcpView("Aguardando"); setSelected(null); setEditing(false); setMenu(false);
+    setActive(item); setFilter("Todos ativos"); setMachineFilter("Todas"); setPcpMachine("Todas"); setPcpCategory("Todas"); setPcpView("Aguardando"); setSelected(null); setEditing(false); setMenu(false);
   }
 
   async function programOrder(order: Order, machineId: string, priority: boolean) {
     const machine = data.machines.find(machine => machine.id === machineId);
     const source = rows.find(row => row.key === `pedido:${order.id}`);
     if (!machine || !source) return;
+    const currentQueue = activeOrders.filter(item => item.maquinaId === machine.id && item.id !== order.id && group(item.statusProducao) !== "Finalizado");
+    const lastPosition = currentQueue.reduce((max,item) => Math.max(max,item.ordemFila || 0),0);
     const updated: Order = {
       ...order,
       maquinaId: machine.id,
       prioridade: priority ? 1 : 0,
+      ordemFila: order.maquinaId === machine.id && order.ordemFila ? order.ordemFila : lastPosition + 1,
       statusProducao: `FILA DA ${machine.setor.toUpperCase()}`,
     };
     setSaving(true); setNotice("");
@@ -306,6 +350,49 @@ export default function Home() {
     } finally {
       setSaving(false);
     }
+  }
+
+  async function movePcpOrder(order: Order, direction: -1 | 1) {
+    if (pcpMachine === "Todas") return setNotice("Selecione uma máquina para alterar a sequência da fila.");
+    if (pcpSort !== "Manual") return setNotice("Para usar as setas, altere a ordenação para Sequência manual.");
+    const queue = pcpQueue.filter(item => item.maquinaId === pcpMachine);
+    const index = queue.findIndex(item => item.id === order.id);
+    const other = queue[index + direction];
+    if (index < 0 || !other) return;
+    const sourceA = rows.find(row => row.key === `pedido:${order.id}`);
+    const sourceB = rows.find(row => row.key === `pedido:${other.id}`);
+    if (!sourceA || !sourceB) return;
+    const positionA = order.ordemFila ?? index + 1;
+    const positionB = other.ordemFila ?? index + direction + 1;
+    setSaving(true); setNotice("");
+    try {
+      await saveOrder({ ...order, ordemFila: positionB }, sourceA.updated_at);
+      await saveOrder({ ...other, ordemFila: positionA }, sourceB.updated_at);
+      setNotice("Sequência da fila atualizada.");
+      await refresh();
+    } catch (e) { setNotice(e instanceof Error ? e.message : "Não foi possível alterar a sequência."); }
+    finally { setSaving(false); }
+  }
+
+  function printPcpQueue() {
+    const machine = data.machines.find(item => item.id === pcpMachine);
+    if (!machine) return setNotice("Selecione uma máquina para imprimir a fila.");
+    const queue = pcpQueue.filter(item => item.maquinaId === machine.id);
+    if (!queue.length) return setNotice("Não há pedidos na fila da máquina selecionada.");
+    const produced = (order:Order) => data.records.filter(record => record.maquinaId === machine.id && (record.idPedido === order.id || record.idPedido === order.numeroOp || record.idPedido === order.numeroPedido)).reduce((sum,record) => sum + number(record.qtdProduzido),0);
+    const safe = (value:unknown) => String(value ?? "").replace(/[&<>"']/g, character => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[character] || character));
+    const categoryTotals = PRODUCT_CATEGORIES.map(category => {
+      const categoryOrders = queue.filter(order => inferredCategory(order) === category.value);
+      return { ...category, orders: categoryOrders.length, totalKg: categoryOrders.reduce((sum,order) => sum + number(order.quantidade),0) };
+    }).filter(category => category.orders > 0);
+    const totalKg = categoryTotals.reduce((sum,category) => sum + category.totalKg,0);
+    const categoryCards = categoryTotals.map(category => `<div class="category-card"><span>${safe(category.label)}</span><strong>${safe(category.totalKg.toLocaleString("pt-BR",{maximumFractionDigits:2}))} kg</strong><small>${category.orders} pedido(s)</small></div>`).join("");
+    const body = queue.map((order,index) => `<tr><td>${index + 1}º</td><td>${safe(date(order.data))}</td><td>${safe(order.numeroOp || "SEM OP")}</td><td>${safe(order.cliente)}</td><td>${safe(order.descricaoItem)}</td><td>${safe(number(order.quantidade).toLocaleString("pt-BR",{maximumFractionDigits:2}))}</td><td>${safe(produced(order).toLocaleString("pt-BR",{minimumFractionDigits:2,maximumFractionDigits:2}))}</td><td>${safe(order.statusProducao)}</td></tr>`).join("");
+    const frame = document.createElement("iframe"); frame.style.cssText = "position:fixed;width:0;height:0;border:0"; document.body.appendChild(frame);
+    const printWindow = frame.contentWindow; const printDocument = frame.contentDocument;
+    if (!printWindow || !printDocument) { frame.remove(); return setNotice("O navegador bloqueou a preparação da impressão."); }
+    printDocument.open(); printDocument.write(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Fila PCP - ${safe(machine.name)}</title><style>@page{size:A4 landscape;margin:10mm}*{box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact}body{font-family:Arial,sans-serif;color:#111827;margin:0}header{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:3px solid #123b75;padding-bottom:8px;margin-bottom:8px}h1{font-size:19px;color:#123b75;margin:0 0 2px}.machine{font-size:12px;font-weight:700}.meta{text-align:right;font-size:9px;line-height:1.5}.category-summary{break-inside:avoid;margin-bottom:8px;padding:7px;border:1px solid #b8c3d1;border-radius:5px;background:#f7f9fc}.category-heading{display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:6px}.category-heading span{font-size:8px;font-weight:800;text-transform:uppercase;color:#41536b}.category-heading strong{font-size:10px;color:#123b75}.category-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:5px}.category-card{padding:5px 6px;border:1px solid #d4dce6;border-left:3px solid #3478f6;border-radius:4px;background:#fff}.category-card span,.category-card strong,.category-card small{display:block}.category-card span{font-size:6px;font-weight:800;text-transform:uppercase;color:#667085}.category-card strong{margin-top:2px;font-size:8px;color:#1f3552}.category-card small{margin-top:1px;font-size:6px;color:#7d8796}table{width:100%;border-collapse:collapse;table-layout:fixed;font-size:7.5px}thead{display:table-header-group}th{background:#123b75;color:#fff;text-transform:uppercase;font-size:6.5px}th,td{border:1px solid #596273;padding:4px;text-align:left;vertical-align:middle}th:nth-child(1){width:5%}th:nth-child(2){width:8%}th:nth-child(3){width:7%}th:nth-child(4){width:16%}th:nth-child(5){width:35%}th:nth-child(6){width:7%}th:nth-child(7){width:9%}th:nth-child(8){width:13%}th:nth-child(7){background:#16794f}td:nth-child(7){background:#e8f7ef;color:#116b47;font-weight:700}td:nth-child(1),td:nth-child(2),td:nth-child(3),td:nth-child(6),td:nth-child(7){text-align:center}tr{break-inside:avoid}footer{display:flex;justify-content:space-between;margin-top:8px;color:#667085;font-size:7px}</style></head><body><header><div><h1>PROGRAMAÇÃO DE PRODUÇÃO</h1><div class="machine">${safe(machine.name)} · ${safe(machine.setor)}</div></div><div class="meta">Emitido em ${new Date().toLocaleString("pt-BR",{timeZone:"America/Fortaleza"})}<br>${queue.length} pedido(s) na fila</div></header><section class="category-summary"><div class="category-heading"><span>Resumo por categoria</span><strong>Total geral: ${safe(totalKg.toLocaleString("pt-BR",{maximumFractionDigits:2}))} kg · ${queue.length} pedido(s)</strong></div><div class="category-grid">${categoryCards}</div></section><table><thead><tr><th>Ordem</th><th>Data pedido</th><th>OP</th><th>Cliente</th><th>Descrição</th><th>Qtd.</th><th>Qtd. produzida</th><th>Status</th></tr></thead><tbody>${body}</tbody></table><footer><span>FORPACK · GUAIÚBA · PAINEL DE PRODUÇÃO</span><span>Sequência oficial da máquina no momento da emissão</span></footer></body></html>`); printDocument.close();
+    window.setTimeout(() => { printWindow.focus(); printWindow.print(); window.setTimeout(() => frame.remove(),1000); },250);
   }
   async function registerProduction(order: Order, input: Production) {
     const machine = data.machines.find(item => item.id === order.maquinaId);
@@ -419,7 +506,7 @@ export default function Home() {
       </header>
 
       <div className="workspace">
-        {notice && <div className={`notice ${/^(Pedido|Produção|OP)/.test(notice) ? "success" : "failure"}`}><span>{notice}</span><button onClick={() => setNotice("")}>×</button></div>}
+        {notice && <div className={`notice ${/^(Pedido|Produção|OP|Sequência)/.test(notice) ? "success" : "failure"}`}><span>{notice}</span><button onClick={() => setNotice("")}>×</button></div>}
         <div className="page-heading"><div><p className="eyebrow">DADOS REAIS · SUPABASE</p><h1>{active === "Visão geral" ? "Painel mensal de produção" : active === "Central de prazos" ? "Central de prazos e atrasos" : active === "Lançamentos" ? "Lançamentos do dia" : active === "Relatório diário" ? "Relatório diário por setor" : active === "Painel mensal" ? "Relatório mensal de produção" : active === "Programação PCP" ? "Programação e reprogramação PCP" : active === "Produção" ? "Filas de produção" : active === "Relatórios" ? "Histórico de produção" : active === "Cadastros" ? "Cadastros operacionais" : "Pedidos e ordens de produção"}</h1><p>{active === "Visão geral" ? "Indicadores consolidados para acompanhar volume, perdas e desempenho por setor." : active === "Central de prazos" ? "Priorize pedidos atrasados, próximos do vencimento e sem movimentação recente." : active === "Lançamentos" ? "Acompanhe os apontamentos do turno e acesse rapidamente a OP para registrar nova produção." : active === "Relatório diário" ? "Compare a produção de cada máquina nos turnos da manhã, tarde e noite." : active === "Painel mensal" ? "Consulte produção e perdas por período, setor, máquina, operador e OP." : active === "Programação PCP" ? "Programe pedidos pendentes ou transfira uma OP já programada para outra máquina ou setor." : active === "Produção" ? "Selecione uma OP programada para registrar um novo apontamento." : active === "Relatórios" ? "Consulte e corrija apontamentos reais com filtros operacionais." : active === "Cadastros" ? "Mantenha as listas usadas nos formulários de pedidos e apontamentos." : "Acompanhe o avanço real de cada pedido, do mais antigo ao mais novo."}</p></div>
           {active === "Pedidos / OP" && <button className="new-order-button" onClick={() => { setNotice(""); setNewOrderOpen(true); }}><span>＋</span> Novo pedido</button>}
         </div>
@@ -439,7 +526,7 @@ export default function Home() {
         : !["Visão geral","Central de prazos","Lançamentos","Relatório diário","Painel mensal"].includes(active) && <section className="panel">
           <div className="panel-head">
             {active === "Pedidos / OP" && <div className="tabs">{["Todos ativos","Aguardando","Programado","Em produção","Finalizados"].map(item => <button key={item} className={filter === item ? "tab active" : "tab"} onClick={() => { setFilter(item); setSelected(null); }}>{item}{item === "Finalizados" ? ` (${finishedOrders.length})` : ""}</button>)}</div>}
-            {active === "Programação PCP" && <div className="tabs"><button className={pcpView === "Aguardando" ? "tab active" : "tab"} onClick={() => { setPcpView("Aguardando"); setSelected(null); }}>Aguardando ({metrics.waiting})</button><button className={pcpView === "Programadas" ? "tab active" : "tab"} onClick={() => { setPcpView("Programadas"); setSelected(null); }}>OPs programadas ({metrics.programmed})</button></div>}
+            {active === "Programação PCP" && <><div className="tabs"><button className={pcpView === "Aguardando" ? "tab active" : "tab"} onClick={() => { setPcpView("Aguardando"); setPcpMachine("Todas"); setPcpCategory("Todas"); setSelected(null); }}>Aguardando ({metrics.waiting})</button><button className={pcpView === "Programadas" ? "tab active" : "tab"} onClick={() => { setPcpView("Programadas"); setSelected(null); }}>OPs programadas ({metrics.programmed})</button></div>{pcpView === "Programadas" && <div className="pcp-tools"><label><span>Máquina</span><select value={pcpMachine} onChange={event => { setPcpMachine(event.target.value); setSelected(null); }}><option value="Todas">Todas as máquinas</option>{data.machines.map(machine => <option key={machine.id} value={machine.id}>{machine.name} · {machine.setor}</option>)}</select></label><label><span>Categoria</span><select value={pcpCategory} onChange={event => setPcpCategory(event.target.value as "Todas" | ProductCategory)}><option value="Todas">Todas as categorias</option>{PRODUCT_CATEGORIES.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label><label><span>Ordenar fila</span><select value={pcpSort} onChange={event => setPcpSort(event.target.value as "Data" | "Manual")}><option value="Data">Pedido mais antigo primeiro</option><option value="Manual">Sequência manual</option></select></label><button className="pcp-print" onClick={printPcpQueue} disabled={pcpMachine === "Todas"}>▣ Imprimir fila</button><b>{pcpQueue.length} pedido(s) no filtro</b></div>}</>}
             {active === "Produção" && <label className="machine-filter"><span>Máquina</span><select value={machineFilter} onChange={event => setMachineFilter(event.target.value)}><option value="Todas">Todas as máquinas</option>{data.machines.map(machine => <option key={machine.id} value={machine.id}>{machine.name} · {machine.setor}</option>)}</select></label>}
             {active === "Relatórios" && <div className="report-filters">
               <label><span>De</span><input type="date" value={reportStart} onChange={event => setReportStart(event.target.value)} /></label>
@@ -452,6 +539,7 @@ export default function Home() {
           {error ? <div className="state error"><strong>Falha na sincronização</strong><span>{error}</span><button className="secondary" onClick={refresh}>Tentar novamente</button></div>
           : loading ? <div className="state"><span className="spinner" /><strong>Carregando dados reais...</strong></div>
           : active === "Relatórios" ? <ProductionReport records={reportRecords} orders={data.orders} machines={data.machines} onEdit={setSelectedRecord} />
+          : active === "Programação PCP" && pcpView === "Programadas" ? <><PcpCategorySummary items={pcpCategorySummary} /><PcpQueueTable orders={pcpQueue} machines={data.machines} records={data.records} selectedMachine={pcpMachine} sortMode={pcpSort} saving={saving} onMove={movePcpOrder} onOpen={setSelected} /></>
           : <div className="table-wrap"><table><thead><tr><th>Pedido / OP</th><th>Cliente e produto</th><th>Qtd. pedido</th><th>Status atual</th><th>Produzido por setor</th><th /></tr></thead>
             <tbody>{visible.map(order => <OrderRow key={order.id} order={order} totals={data.totals.get(order.id) || {}} onOpen={() => setSelected(order)} />)}</tbody></table>
             {!visible.length && <div className="empty">Nenhum pedido encontrado nesta visualização.</div>}</div>}
@@ -463,7 +551,7 @@ export default function Home() {
     {selected && <div className="modal-backdrop" onMouseDown={() => !saving && setSelected(null)}><article className="drawer" onMouseDown={e => e.stopPropagation()}>
       <button className="close" onClick={() => { setSelected(null); setEditing(false); }}>×</button><p className="eyebrow">PEDIDO {selected.numeroPedido || selected.id}</p><h2>{selected.numeroOp ? `OP ${selected.numeroOp}` : "OP não emitida"}</h2>
       <p className="drawer-client">{selected.cliente}<br />{selected.descricaoItem}</p>
-      <div className="drawer-grid"><div><small>Data do pedido</small><strong>{date(selected.data)}</strong></div><div><small>Quantidade</small><strong>{kg(number(selected.quantidade))}</strong></div><div><small>Status</small><strong>{selected.statusProducao || "Sem status"}</strong></div><div><small>Material</small><strong>{selected.material || "—"}</strong></div></div>
+      <div className="drawer-grid"><div><small>Data do pedido</small><strong>{date(selected.data)}</strong></div><div><small>Quantidade</small><strong>{kg(number(selected.quantidade))}</strong></div><div><small>Status</small><strong>{selected.statusProducao || "Sem status"}</strong></div><div><small>Categoria</small><strong>{categoryLabel(selected)}</strong></div></div>
       {active === "Programação PCP" && selected.maquinaId && <div className="current-programming"><span>Programação atual</span><strong>{data.machines.find(machine => machine.id === selected.maquinaId)?.name || selected.maquinaId}</strong><small>{data.machines.find(machine => machine.id === selected.maquinaId)?.setor || "Setor não identificado"}</small></div>}
       <h3>Quantidade produzida por setor</h3><div className="sector-list">{SECTORS.map(sector => { const value = data.totals.get(selected.id)?.[sector] || 0; return <div key={sector}><span>{sector}</span><strong className={value ? "has-value" : ""}>{value ? kg(value) : "—"}</strong></div>; })}</div>
       {editing
@@ -550,6 +638,33 @@ function RegistryPanel({kind,onKind,values,query,onQuery,saving,onSave}:{kind:Re
       <footer className="panel-foot"><span>{filtered.length} item(ns) exibido(s)</span><span>Inclusão e edição habilitadas · exclusão bloqueada</span></footer>
     </div>
   </section>;
+}
+
+function PcpCategorySummary({items}:{items:{category:ProductCategory;label:string;orders:number;totalKg:number}[]}) {
+  const totalKg = items.reduce((sum,item) => sum + item.totalKg,0);
+  const totalOrders = items.reduce((sum,item) => sum + item.orders,0);
+  if (!items.length) return null;
+  return <section className="pcp-category-summary" aria-label="Resumo da fila por categoria">
+    <header><div><strong>Resumo por categoria</strong><span>Quilos programados nos pedidos exibidos na fila</span></div><div className="pcp-category-total"><small>Total geral</small><strong>{kg(totalKg)}</strong><span>{totalOrders} pedido(s)</span></div></header>
+    <div className="pcp-category-grid">{items.map(item => <article key={item.category} className={`pcp-category-card category-${item.category.toLocaleLowerCase("pt-BR").replace(/_/g,"-")}`}>
+      <span>{item.label}</span><strong>{kg(item.totalKg)}</strong><small>{item.orders} pedido(s)</small>
+    </article>)}</div>
+  </section>;
+}
+
+function PcpQueueTable({orders,machines,records,selectedMachine,sortMode,saving,onMove,onOpen}:{orders:Order[];machines:Machine[];records:Production[];selectedMachine:string;sortMode:"Data"|"Manual";saving:boolean;onMove:(order:Order,direction:-1|1)=>void;onOpen:(order:Order)=>void}) {
+  const machineOf = (order:Order) => machines.find(machine => machine.id === order.maquinaId);
+  const produced = (order:Order) => records.filter(record => record.maquinaId === order.maquinaId && (record.idPedido === order.id || record.idPedido === order.numeroOp || record.idPedido === order.numeroPedido)).reduce((sum,record) => sum + number(record.qtdProduzido),0);
+  return <div className="table-wrap pcp-queue-wrap"><table className="pcp-queue-table"><thead><tr><th>Ordem</th><th>Data pedido</th><th>OP / pedido</th><th>Cliente</th><th>Descrição</th><th>Qtd.</th><th className="queue-produced">Qtd. produzida</th><th>Máquina / status</th><th>Sequência</th><th><span className="sr-only">Ações</span></th></tr></thead><tbody>{orders.map((order,index) => { const machine = machineOf(order); const queue = orders.filter(item => item.maquinaId === order.maquinaId); const localIndex = queue.findIndex(item => item.id === order.id); return <tr key={order.id}>
+    <td><strong className="queue-position">{selectedMachine === "Todas" ? "—" : `${index + 1}º`}</strong></td>
+    <td><strong>{date(order.data)}</strong></td>
+    <td><button className="pcp-order-link" onClick={() => onOpen(order)}>{order.numeroOp ? `OP ${order.numeroOp}` : "SEM OP"}</button><small>{order.numeroPedido || order.id}</small></td>
+    <td><strong>{order.cliente || "—"}</strong></td><td title={order.descricaoItem || "Descrição não informada"}>{order.descricaoItem || "—"}<small className="category-pill">{categoryLabel(order)}</small></td>
+    <td><strong>{kg(number(order.quantidade))}</strong></td><td className="queue-produced"><strong>{kg(produced(order))}</strong></td>
+    <td><strong>{machine?.name || order.maquinaId || "—"}</strong><small>{order.statusProducao || machine?.setor || "—"}</small></td>
+    <td><div className="queue-actions"><button title={sortMode === "Data" ? "Selecione Sequência manual para reordenar" : "Subir na fila"} disabled={saving || sortMode === "Data" || selectedMachine === "Todas" || localIndex === 0} onClick={() => onMove(order,-1)}>▲</button><button title={sortMode === "Data" ? "Selecione Sequência manual para reordenar" : "Descer na fila"} disabled={saving || sortMode === "Data" || selectedMachine === "Todas" || localIndex === queue.length - 1} onClick={() => onMove(order,1)}>▼</button></div></td>
+    <td className="queue-more-cell"><button className="more queue-more" type="button" title="Alterar máquina deste pedido" aria-label={`Alterar máquina do pedido ${order.numeroPedido || order.numeroOp || order.id}`} onClick={() => onOpen(order)}>•••</button></td>
+  </tr>; })}</tbody></table>{!orders.length && <div className="empty">Nenhuma OP programada para os filtros selecionados.</div>}</div>;
 }
 
 function DailyLaunches({records,orders,machines,selectedDate,selectedMachine,onDate,onMachine,onOpen}:{records:Production[];orders:Order[];machines:Machine[];selectedDate:string;selectedMachine:string;onDate:(value:string)=>void;onMachine:(value:string)=>void;onOpen:(order:Order)=>void}) {
@@ -823,10 +938,18 @@ function OrderWeightBalance({records,orders,machines,selectedOrder}:{records:Pro
 function DeadlineCenter({orders,records,machines,onOpen}:{orders:Order[];records:Production[];machines:Machine[];onOpen:(order:Order)=>void}) {
   const [risk, setRisk] = useState("Todos");
   const [term, setTerm] = useState("");
+  const [capacityMachine, setCapacityMachine] = useState("");
+  const [dailyCapacity, setDailyCapacity] = useState(2500);
   const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/Fortaleza" });
   const dayMs = 86400000;
   const diffDays = (value: string) => Math.round((Date.parse(`${value}T12:00:00`) - Date.parse(`${today}T12:00:00`)) / dayMs);
   const machineMap = new Map(machines.map(machine => [machine.id, machine]));
+  const scheduledMachines = machines.filter(machine => orders.some(order => order.maquinaId === machine.id));
+  useEffect(() => {
+    if (capacityMachine && machines.some(machine => machine.id === capacityMachine)) return;
+    const ef1 = machines.find(machine => machine.name.toLocaleUpperCase("pt-BR").includes("EF1"));
+    setCapacityMachine(ef1?.id || scheduledMachines[0]?.id || "");
+  }, [capacityMachine, machines, scheduledMachines]);
   const analysis = orders.map(order => {
     const orderRecords = records.filter(record => record.idPedido === order.id || record.idPedido === order.numeroOp || record.idPedido === order.numeroPedido);
     const sorted = [...orderRecords].sort((a,b) => (b.dataProducao || "").localeCompare(a.dataProducao || ""));
@@ -867,6 +990,31 @@ function DeadlineCenter({orders,records,machines,onOpen}:{orders:Order[];records
   const clean = term.toLocaleLowerCase("pt-BR").trim();
   const visible = analysis.filter(item => (risk === "Todos" || item.category === risk) && (!clean || `${item.order.numeroPedido || ""} ${item.order.numeroOp || ""} ${item.order.cliente} ${item.order.descricaoItem}`.toLocaleLowerCase("pt-BR").includes(clean)));
   const priorityActions = analysis.filter(item => item.action.tone !== "normal").slice(0,3);
+  const selectedCapacityMachine = machineMap.get(capacityMachine);
+  const machineQueue = orders.filter(order => order.maquinaId === capacityMachine).sort((a,b) => (a.data || "").localeCompare(b.data || "") || (a.ordemFila ?? 999999) - (b.ordemFila ?? 999999));
+  const queueWithBalance = machineQueue.map(order => {
+    const produced = records.filter(record => record.maquinaId === capacityMachine && (record.idPedido === order.id || record.idPedido === order.numeroOp || record.idPedido === order.numeroPedido)).reduce((sum,record) => sum + number(record.qtdProduzido),0);
+    return { order, produced, balance: Math.max(0, number(order.quantidade) - produced) };
+  }).filter(item => item.balance > 0);
+  const totalQueueKg = queueWithBalance.reduce((sum,item) => sum + item.balance,0);
+  const capacity = Math.max(1,dailyCapacity || 0);
+  const capacityDays:{date:string;planned:number;allocations:{order:Order;kg:number;balanceAfter:number}[]}[] = [];
+  let planDate = today;
+  let dayIndex = 0;
+  for (const item of queueWithBalance) {
+    let remaining = item.balance;
+    while (remaining > 0 && dayIndex < 180) {
+      if (!capacityDays[dayIndex]) capacityDays[dayIndex] = { date:planDate, planned:0, allocations:[] };
+      const currentDay = capacityDays[dayIndex];
+      const available = Math.max(0,capacity - currentDay.planned);
+      if (available <= 0) { dayIndex += 1; planDate = addCalendarDays(today,dayIndex); continue; }
+      const allocated = Math.min(remaining,available);
+      remaining -= allocated;
+      currentDay.planned += allocated;
+      currentDay.allocations.push({ order:item.order,kg:allocated,balanceAfter:remaining });
+      if (currentDay.planned >= capacity) { dayIndex += 1; planDate = addCalendarDays(today,dayIndex); }
+    }
+  }
   return <section className="deadline-center">
     <div className="deadline-kpis">
       <button className="deadline-kpi late" onClick={() => setRisk("Atrasados")}><span>!</span><div><small>Pedidos atrasados</small><strong>{counts.late}</strong><em>Exigem ação imediata</em></div></button>
@@ -875,6 +1023,17 @@ function DeadlineCenter({orders,records,machines,onOpen}:{orders:Order[];records
       <button className="deadline-kpi idle" onClick={() => setRisk("Sem movimentação")}><span>―</span><div><small>Sem movimentação</small><strong>{counts.idle}</strong><em>3 dias ou sem apontamento</em></div></button>
       <button className="deadline-kpi cliche" onClick={() => setRisk("Aguardando clichê")}><span>C</span><div><small>Aguardando clichê</small><strong>{counts.cliche}</strong><em>Prazo ainda não iniciado</em></div></button>
     </div>
+    <section className="capacity-planner">
+      <header><div><p className="eyebrow">PLANEJAMENTO POR CAPACIDADE</p><h2>Agenda diária da máquina</h2><span>Distribuição automática da fila por volume disponível em 24 horas</span></div><div className="capacity-controls"><label><span>Máquina</span><select value={capacityMachine} onChange={event => setCapacityMachine(event.target.value)}>{scheduledMachines.map(machine => <option key={machine.id} value={machine.id}>{machine.name} · {machine.setor}</option>)}</select></label><label><span>Capacidade em 24h</span><div><input type="number" min="1" step="100" value={dailyCapacity} onChange={event => setDailyCapacity(Math.max(1,Number(event.target.value) || 1))} /><b>kg</b></div></label></div></header>
+      <div className="capacity-summary"><article><small>Máquina selecionada</small><strong>{selectedCapacityMachine?.name || "Sem máquina"}</strong><span>{selectedCapacityMachine?.setor || "Selecione uma máquina programada"}</span></article><article><small>Pedidos na fila</small><strong>{queueWithBalance.length}</strong><span>Com saldo a produzir</span></article><article><small>Carga programada</small><strong>{kg(totalQueueKg)}</strong><span>Saldo da fila selecionada</span></article><article><small>Previsão de conclusão</small><strong>{capacityDays.length ? date(capacityDays[capacityDays.length - 1].date) : "—"}</strong><span>{capacityDays.length} dia(s) de produção</span></article></div>
+      <div className="capacity-days">{capacityDays.map((day,index) => { const utilization = Math.min(100,day.planned/capacity*100); const dayDate = new Date(`${day.date}T12:00:00`); return <article className="capacity-day" key={day.date}>
+        <header><div><small>Dia {index + 1}</small><strong>{dayDate.toLocaleDateString("pt-BR",{weekday:"long",day:"2-digit",month:"2-digit"})}</strong></div><span>{utilization.toLocaleString("pt-BR",{maximumFractionDigits:0})}% ocupado</span></header>
+        <div className="capacity-bar"><i style={{width:`${utilization}%`}} /></div>
+        <div className="capacity-day-total"><strong>{kg(day.planned)}</strong><span>de {kg(capacity)}</span></div>
+        <div className="capacity-orders">{day.allocations.map((allocation,allocationIndex) => <button key={`${allocation.order.id}-${allocationIndex}`} onClick={() => onOpen(allocation.order)}><span><b>{allocation.order.numeroOp ? `OP ${allocation.order.numeroOp}` : allocation.order.numeroPedido || "Pedido"}</b><small>{allocation.order.cliente}</small></span><strong>{kg(allocation.kg)}</strong>{allocation.balanceAfter > 0 && <em>continua →</em>}</button>)}</div>
+      </article>; })}{!capacityDays.length && <div className="capacity-empty">Não há saldo programado para a máquina selecionada.</div>}</div>
+      <footer><span>Início: hoje · operação contínua em dias corridos</span><span>Ordem usada: pedido mais antigo primeiro</span></footer>
+    </section>
     {!!priorityActions.length && <div className="deadline-action-board">
       <header><div><p className="eyebrow">PLANO DO DIA</p><h2>Próximas ações recomendadas</h2></div><span>Gerado automaticamente pelos prazos e movimentações</span></header>
       <div>{priorityActions.map((item,index) => <button key={item.order.id} onClick={() => onOpen(item.order)}>
@@ -1136,6 +1295,7 @@ function EditOrderForm({order,clients,products,materials,saving,onSave,onCancel}
     </div>
     <label className="field"><span>Cliente *</span><input list="clientes-edicao" value={input.cliente} onChange={event => update("cliente",event.target.value)} required /><datalist id="clientes-edicao">{clients.map(client => <option key={client} value={client} />)}</datalist></label>
     <label className="field"><span>Produto / descrição *</span><input list="produtos-edicao" value={input.descricaoItem} onChange={event => update("descricaoItem",event.target.value)} required /><datalist id="produtos-edicao">{products.map(product => <option key={product} value={product} />)}</datalist></label>
+    <label className="field"><span>Categoria do produto *</span><select value={input.categoriaProduto || inferredCategory(input)} onChange={event => update("categoriaProduto",event.target.value)}>{PRODUCT_CATEGORIES.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}</select><small className="field-help">Confirme a categoria sugerida automaticamente.</small></label>
     <div className="form-grid">
       <label className="field"><span>Quantidade (kg) *</span><input inputMode="decimal" value={input.quantidade} onChange={event => update("quantidade",event.target.value)} required /></label>
       <label className="field"><span>Número da OP</span><input value={input.numeroOp || ""} onChange={event => update("numeroOp",event.target.value)} /></label>
@@ -1153,7 +1313,7 @@ function EditOrderForm({order,clients,products,materials,saving,onSave,onCancel}
 
 function NewOrderForm({clients,products,materials,saving,onSave,onCancel}:{clients:string[];products:string[];materials:string[];saving:boolean;onSave:(input:Omit<Order,"id">)=>void;onCancel:()=>void}) {
   const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/Fortaleza" });
-  const [input, setInput] = useState<Omit<Order,"id">>({ data: today, numeroPedido: "", numeroOp: "", cliente: "", descricaoItem: "", quantidade: "", material: "", observacao: "", statusProducao: "AGUARDANDO PROGRAMAÇÃO", tipoPrazo:"IMPRESSO_REPETICAO", dataChegadaCliche:"" });
+  const [input, setInput] = useState<Omit<Order,"id">>({ data: today, numeroPedido: "", numeroOp: "", cliente: "", descricaoItem: "", quantidade: "", categoriaProduto:"NAO_CLASSIFICADO", material: "", observacao: "", statusProducao: "AGUARDANDO PROGRAMAÇÃO", tipoPrazo:"IMPRESSO_REPETICAO", dataChegadaCliche:"" });
   const update = (field:keyof Omit<Order,"id">, value:string) => setInput(current => ({...current,[field]:value}));
   const valid = Boolean(input.data && input.cliente.trim() && input.descricaoItem.trim() && number(input.quantidade) > 0);
   return <form className="new-order-form" onSubmit={event => { event.preventDefault(); if (valid && !saving) onSave(input); }}>
@@ -1169,6 +1329,7 @@ function NewOrderForm({clients,products,materials,saving,onSave,onCancel}:{clien
       <datalist id="produtos-cadastrados">{products.map(product => <option key={product} value={product} />)}</datalist>
       <small className="field-help">{products.length} produtos cadastrados disponíveis</small>
     </label>
+    <label className="field"><span>Categoria do produto *</span><select value={input.categoriaProduto || "NAO_CLASSIFICADO"} onChange={event => update("categoriaProduto",event.target.value)}>{PRODUCT_CATEGORIES.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
     <div className="form-grid">
       <label className="field"><span>Quantidade do pedido (kg) *</span><input inputMode="decimal" value={input.quantidade} onChange={event => update("quantidade",event.target.value)} placeholder="Ex.: 1.500" required /></label>
       <label className="field"><span>Número da OP</span><input value={input.numeroOp} onChange={event => update("numeroOp",event.target.value)} placeholder="Opcional" /></label>
