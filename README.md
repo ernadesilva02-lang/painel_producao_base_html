@@ -1,4 +1,4 @@
-# Painel de Produção — Versão 10
+# Painel de Produção — Versão 11
 
 Versão preparada para publicação com GitHub e Vercel usando Next.js.
 
@@ -9,8 +9,10 @@ Versão preparada para publicação com GitHub e Vercel usando Next.js.
 - Menu de três pontos para alteração de máquina.
 - Coluna de quantidade produzida destacada em verde.
 - Descrição ampliada sem quebra de texto.
-- Categorias de produto e totais em kg por categoria.
-- Impressão da fila com data do pedido e resumo por categoria.
+- Categorias de produto, filtro e totais em kg também na fila aguardando.
+- Impressão da fila aguardando conforme categoria e busca aplicadas.
+- Impressão da fila programada com data do pedido e resumo por categoria.
+- Retorno de uma OP programada para Aguardando Programação, preservando todo o histórico produzido.
 - Central de Prazos com agenda diária por capacidade da máquina.
 - Capacidade inicial da EF1 em 2.500 kg por 24 horas.
 - Divisão automática de pedidos entre os dias de produção.

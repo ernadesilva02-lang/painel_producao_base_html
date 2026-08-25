@@ -258,7 +258,7 @@ export default function Home() {
     const base = active === "Pedidos / OP" && filter === "Finalizados" ? finishedOrders : activeOrders;
     return base.filter(order => {
       const g = group(order.statusProducao);
-      return (active !== "Programação PCP" || (pcpView === "Aguardando" ? g === "Aguardando" : g !== "Aguardando" && g !== "Finalizado" && (pcpMachine === "Todas" || order.maquinaId === pcpMachine) && (pcpCategory === "Todas" || inferredCategory(order) === pcpCategory)))
+      return (active !== "Programação PCP" || (pcpView === "Aguardando" ? g === "Aguardando" && (pcpCategory === "Todas" || inferredCategory(order) === pcpCategory) : g !== "Aguardando" && g !== "Finalizado" && (pcpMachine === "Todas" || order.maquinaId === pcpMachine) && (pcpCategory === "Todas" || inferredCategory(order) === pcpCategory)))
         && (active !== "Produção" || (g === "Em produção" && order.maquinaId && (machineFilter === "Todas" || order.maquinaId === machineFilter)))
         && (filter === "Todos ativos" || filter === "Finalizados" || g === filter)
         && (!term || `${order.id} ${order.numeroPedido || ""} ${order.numeroOp || ""} ${order.cliente} ${order.descricaoItem}`.toLocaleLowerCase("pt-BR").includes(term));
@@ -352,6 +352,29 @@ export default function Home() {
     }
   }
 
+  async function returnOrderToWaiting(order: Order) {
+    const source = rows.find(row => row.key === `pedido:${order.id}`);
+    if (!source) return setNotice("Não foi possível localizar este pedido para reprogramação.");
+    const updated: Order = {
+      ...order,
+      maquinaId: "",
+      prioridade: 0,
+      ordemFila: undefined,
+      statusProducao: "AGUARDANDO PROGRAMAÇÃO",
+    };
+    setSaving(true); setNotice("");
+    try {
+      await saveOrder(updated, source.updated_at);
+      setSelected(null);
+      setNotice(`Pedido ${order.numeroPedido || order.numeroOp || order.id} retornou para Aguardando Programação.`);
+      await refresh();
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : "Não foi possível retornar o pedido para Aguardando Programação.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function movePcpOrder(order: Order, direction: -1 | 1) {
     if (pcpMachine === "Todas") return setNotice("Selecione uma máquina para alterar a sequência da fila.");
     if (pcpSort !== "Manual") return setNotice("Para usar as setas, altere a ordenação para Sequência manual.");
@@ -392,6 +415,20 @@ export default function Home() {
     const printWindow = frame.contentWindow; const printDocument = frame.contentDocument;
     if (!printWindow || !printDocument) { frame.remove(); return setNotice("O navegador bloqueou a preparação da impressão."); }
     printDocument.open(); printDocument.write(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Fila PCP - ${safe(machine.name)}</title><style>@page{size:A4 landscape;margin:10mm}*{box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact}body{font-family:Arial,sans-serif;color:#111827;margin:0}header{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:3px solid #123b75;padding-bottom:8px;margin-bottom:8px}h1{font-size:19px;color:#123b75;margin:0 0 2px}.machine{font-size:12px;font-weight:700}.meta{text-align:right;font-size:9px;line-height:1.5}.category-summary{break-inside:avoid;margin-bottom:8px;padding:7px;border:1px solid #b8c3d1;border-radius:5px;background:#f7f9fc}.category-heading{display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:6px}.category-heading span{font-size:8px;font-weight:800;text-transform:uppercase;color:#41536b}.category-heading strong{font-size:10px;color:#123b75}.category-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:5px}.category-card{padding:5px 6px;border:1px solid #d4dce6;border-left:3px solid #3478f6;border-radius:4px;background:#fff}.category-card span,.category-card strong,.category-card small{display:block}.category-card span{font-size:6px;font-weight:800;text-transform:uppercase;color:#667085}.category-card strong{margin-top:2px;font-size:8px;color:#1f3552}.category-card small{margin-top:1px;font-size:6px;color:#7d8796}table{width:100%;border-collapse:collapse;table-layout:fixed;font-size:7.5px}thead{display:table-header-group}th{background:#123b75;color:#fff;text-transform:uppercase;font-size:6.5px}th,td{border:1px solid #596273;padding:4px;text-align:left;vertical-align:middle}th:nth-child(1){width:5%}th:nth-child(2){width:8%}th:nth-child(3){width:7%}th:nth-child(4){width:16%}th:nth-child(5){width:35%}th:nth-child(6){width:7%}th:nth-child(7){width:9%}th:nth-child(8){width:13%}th:nth-child(7){background:#16794f}td:nth-child(7){background:#e8f7ef;color:#116b47;font-weight:700}td:nth-child(1),td:nth-child(2),td:nth-child(3),td:nth-child(6),td:nth-child(7){text-align:center}tr{break-inside:avoid}footer{display:flex;justify-content:space-between;margin-top:8px;color:#667085;font-size:7px}</style></head><body><header><div><h1>PROGRAMAÇÃO DE PRODUÇÃO</h1><div class="machine">${safe(machine.name)} · ${safe(machine.setor)}</div></div><div class="meta">Emitido em ${new Date().toLocaleString("pt-BR",{timeZone:"America/Fortaleza"})}<br>${queue.length} pedido(s) na fila</div></header><section class="category-summary"><div class="category-heading"><span>Resumo por categoria</span><strong>Total geral: ${safe(totalKg.toLocaleString("pt-BR",{maximumFractionDigits:2}))} kg · ${queue.length} pedido(s)</strong></div><div class="category-grid">${categoryCards}</div></section><table><thead><tr><th>Ordem</th><th>Data pedido</th><th>OP</th><th>Cliente</th><th>Descrição</th><th>Qtd.</th><th>Qtd. produzida</th><th>Status</th></tr></thead><tbody>${body}</tbody></table><footer><span>FORPACK · GUAIÚBA · PAINEL DE PRODUÇÃO</span><span>Sequência oficial da máquina no momento da emissão</span></footer></body></html>`); printDocument.close();
+    window.setTimeout(() => { printWindow.focus(); printWindow.print(); window.setTimeout(() => frame.remove(),1000); },250);
+  }
+  function printWaitingQueue() {
+    const queue = pcpQueue;
+    if (!queue.length) return setNotice("Não há pedidos aguardando nos filtros selecionados.");
+    const safe = (value:unknown) => String(value ?? "").replace(/[&<>"']/g, character => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[character] || character));
+    const categoryTotals = PRODUCT_CATEGORIES.map(category => { const orders = queue.filter(order => inferredCategory(order) === category.value); return {...category,orders:orders.length,totalKg:orders.reduce((sum,order) => sum + number(order.quantidade),0)}; }).filter(category => category.orders);
+    const totalKg = categoryTotals.reduce((sum,category) => sum + category.totalKg,0);
+    const cards = categoryTotals.map(category => `<div><span>${safe(category.label)}</span><strong>${safe(category.totalKg.toLocaleString("pt-BR",{maximumFractionDigits:2}))} kg</strong><small>${category.orders} pedido(s)</small></div>`).join("");
+    const body = queue.map(order => `<tr><td>${safe(date(order.data))}</td><td>${safe(order.numeroPedido || order.id)}</td><td>${safe(order.numeroOp || "SEM OP")}</td><td>${safe(order.cliente)}</td><td>${safe(order.descricaoItem)}</td><td>${safe(categoryLabel(order))}</td><td>${safe(number(order.quantidade).toLocaleString("pt-BR",{maximumFractionDigits:2}))} kg</td><td>${safe(order.statusProducao || "Aguardando programação")}</td></tr>`).join("");
+    const frame = document.createElement("iframe"); frame.style.cssText = "position:fixed;width:0;height:0;border:0"; document.body.appendChild(frame);
+    const printWindow = frame.contentWindow; const printDocument = frame.contentDocument;
+    if (!printWindow || !printDocument) { frame.remove(); return setNotice("O navegador bloqueou a preparação da impressão."); }
+    printDocument.open(); printDocument.write(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Fila aguardando PCP</title><style>@page{size:A4 landscape;margin:10mm}*{box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact}body{font-family:Arial,sans-serif;color:#111827;margin:0}header{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:3px solid #123b75;padding-bottom:8px;margin-bottom:8px}h1{font-size:19px;color:#123b75;margin:0 0 2px}.meta{text-align:right;font-size:9px;line-height:1.5}.summary{padding:7px;border:1px solid #b8c3d1;border-radius:5px;background:#f7f9fc;margin-bottom:8px}.summary>p{display:flex;justify-content:space-between;margin:0 0 6px;font-size:8px;font-weight:800;text-transform:uppercase}.grid{display:grid;grid-template-columns:repeat(7,1fr);gap:5px}.grid div{padding:5px 6px;border:1px solid #d4dce6;border-left:3px solid #3478f6;border-radius:4px;background:#fff}.grid span,.grid strong,.grid small{display:block}.grid span{font-size:6px;font-weight:800;text-transform:uppercase;color:#667085}.grid strong{font-size:8px;margin-top:2px}.grid small{font-size:6px;color:#7d8796;margin-top:1px}table{width:100%;border-collapse:collapse;table-layout:fixed;font-size:7.5px}thead{display:table-header-group}th{background:#123b75;color:#fff;text-transform:uppercase;font-size:6.5px}th,td{border:1px solid #596273;padding:4px;text-align:left}th:nth-child(1){width:8%}th:nth-child(2){width:12%}th:nth-child(3){width:8%}th:nth-child(4){width:17%}th:nth-child(5){width:28%}th:nth-child(6){width:10%}th:nth-child(7){width:8%}th:nth-child(8){width:9%}tr{break-inside:avoid}footer{display:flex;justify-content:space-between;margin-top:8px;color:#667085;font-size:7px}</style></head><body><header><div><h1>FILA AGUARDANDO PROGRAMAÇÃO</h1><small>Programação PCP · pedidos pendentes</small></div><div class="meta">Emitido em ${new Date().toLocaleString("pt-BR",{timeZone:"America/Fortaleza"})}<br>${queue.length} pedido(s) no filtro</div></header><section class="summary"><p><span>Resumo por categoria</span><strong>Total geral: ${safe(totalKg.toLocaleString("pt-BR",{maximumFractionDigits:2}))} kg · ${queue.length} pedido(s)</strong></p><div class="grid">${cards}</div></section><table><thead><tr><th>Data pedido</th><th>Pedido</th><th>OP</th><th>Cliente</th><th>Descrição</th><th>Categoria</th><th>Qtd.</th><th>Status</th></tr></thead><tbody>${body}</tbody></table><footer><span>FORPACK · GUAIÚBA · PAINEL DE PRODUÇÃO</span><span>Fila conforme filtros no momento da emissão</span></footer></body></html>`); printDocument.close();
     window.setTimeout(() => { printWindow.focus(); printWindow.print(); window.setTimeout(() => frame.remove(),1000); },250);
   }
   async function registerProduction(order: Order, input: Production) {
@@ -526,7 +563,7 @@ export default function Home() {
         : !["Visão geral","Central de prazos","Lançamentos","Relatório diário","Painel mensal"].includes(active) && <section className="panel">
           <div className="panel-head">
             {active === "Pedidos / OP" && <div className="tabs">{["Todos ativos","Aguardando","Programado","Em produção","Finalizados"].map(item => <button key={item} className={filter === item ? "tab active" : "tab"} onClick={() => { setFilter(item); setSelected(null); }}>{item}{item === "Finalizados" ? ` (${finishedOrders.length})` : ""}</button>)}</div>}
-            {active === "Programação PCP" && <><div className="tabs"><button className={pcpView === "Aguardando" ? "tab active" : "tab"} onClick={() => { setPcpView("Aguardando"); setPcpMachine("Todas"); setPcpCategory("Todas"); setSelected(null); }}>Aguardando ({metrics.waiting})</button><button className={pcpView === "Programadas" ? "tab active" : "tab"} onClick={() => { setPcpView("Programadas"); setSelected(null); }}>OPs programadas ({metrics.programmed})</button></div>{pcpView === "Programadas" && <div className="pcp-tools"><label><span>Máquina</span><select value={pcpMachine} onChange={event => { setPcpMachine(event.target.value); setSelected(null); }}><option value="Todas">Todas as máquinas</option>{data.machines.map(machine => <option key={machine.id} value={machine.id}>{machine.name} · {machine.setor}</option>)}</select></label><label><span>Categoria</span><select value={pcpCategory} onChange={event => setPcpCategory(event.target.value as "Todas" | ProductCategory)}><option value="Todas">Todas as categorias</option>{PRODUCT_CATEGORIES.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label><label><span>Ordenar fila</span><select value={pcpSort} onChange={event => setPcpSort(event.target.value as "Data" | "Manual")}><option value="Data">Pedido mais antigo primeiro</option><option value="Manual">Sequência manual</option></select></label><button className="pcp-print" onClick={printPcpQueue} disabled={pcpMachine === "Todas"}>▣ Imprimir fila</button><b>{pcpQueue.length} pedido(s) no filtro</b></div>}</>}
+            {active === "Programação PCP" && <><div className="tabs"><button className={pcpView === "Aguardando" ? "tab active" : "tab"} onClick={() => { setPcpView("Aguardando"); setPcpMachine("Todas"); setPcpCategory("Todas"); setSelected(null); }}>Aguardando ({metrics.waiting})</button><button className={pcpView === "Programadas" ? "tab active" : "tab"} onClick={() => { setPcpView("Programadas"); setSelected(null); }}>OPs programadas ({metrics.programmed})</button></div>{pcpView === "Aguardando" ? <div className="pcp-tools pcp-waiting-tools"><label><span>Categoria</span><select value={pcpCategory} onChange={event => setPcpCategory(event.target.value as "Todas" | ProductCategory)}><option value="Todas">Todas as categorias</option>{PRODUCT_CATEGORIES.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label><button className="pcp-print" onClick={printWaitingQueue} disabled={!pcpQueue.length}>▣ Imprimir fila</button><b>{pcpQueue.length} pedido(s) no filtro</b></div> : <div className="pcp-tools"><label><span>Máquina</span><select value={pcpMachine} onChange={event => { setPcpMachine(event.target.value); setSelected(null); }}><option value="Todas">Todas as máquinas</option>{data.machines.map(machine => <option key={machine.id} value={machine.id}>{machine.name} · {machine.setor}</option>)}</select></label><label><span>Categoria</span><select value={pcpCategory} onChange={event => setPcpCategory(event.target.value as "Todas" | ProductCategory)}><option value="Todas">Todas as categorias</option>{PRODUCT_CATEGORIES.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label><label><span>Ordenar fila</span><select value={pcpSort} onChange={event => setPcpSort(event.target.value as "Data" | "Manual")}><option value="Data">Pedido mais antigo primeiro</option><option value="Manual">Sequência manual</option></select></label><button className="pcp-print" onClick={printPcpQueue} disabled={pcpMachine === "Todas"}>▣ Imprimir fila</button><b>{pcpQueue.length} pedido(s) no filtro</b></div>}</>}
             {active === "Produção" && <label className="machine-filter"><span>Máquina</span><select value={machineFilter} onChange={event => setMachineFilter(event.target.value)}><option value="Todas">Todas as máquinas</option>{data.machines.map(machine => <option key={machine.id} value={machine.id}>{machine.name} · {machine.setor}</option>)}</select></label>}
             {active === "Relatórios" && <div className="report-filters">
               <label><span>De</span><input type="date" value={reportStart} onChange={event => setReportStart(event.target.value)} /></label>
@@ -540,9 +577,9 @@ export default function Home() {
           : loading ? <div className="state"><span className="spinner" /><strong>Carregando dados reais...</strong></div>
           : active === "Relatórios" ? <ProductionReport records={reportRecords} orders={data.orders} machines={data.machines} onEdit={setSelectedRecord} />
           : active === "Programação PCP" && pcpView === "Programadas" ? <><PcpCategorySummary items={pcpCategorySummary} /><PcpQueueTable orders={pcpQueue} machines={data.machines} records={data.records} selectedMachine={pcpMachine} sortMode={pcpSort} saving={saving} onMove={movePcpOrder} onOpen={setSelected} /></>
-          : <div className="table-wrap"><table><thead><tr><th>Pedido / OP</th><th>Cliente e produto</th><th>Qtd. pedido</th><th>Status atual</th><th>Produzido por setor</th><th /></tr></thead>
+          : <>{active === "Programação PCP" && pcpView === "Aguardando" && <PcpCategorySummary items={pcpCategorySummary} />}<div className="table-wrap"><table><thead><tr><th>Pedido / OP</th><th>Cliente e produto</th><th>Qtd. pedido</th><th>Status atual</th><th>Produzido por setor</th><th /></tr></thead>
             <tbody>{visible.map(order => <OrderRow key={order.id} order={order} totals={data.totals.get(order.id) || {}} onOpen={() => setSelected(order)} />)}</tbody></table>
-            {!visible.length && <div className="empty">Nenhum pedido encontrado nesta visualização.</div>}</div>}
+            {!visible.length && <div className="empty">Nenhum pedido encontrado nesta visualização.</div>}</div></>}
           {!loading && !error && <footer className="panel-foot"><span>{active === "Relatórios" ? `${reportRecords.length} apontamento(s) · ${kg(reportRecords.reduce((sum, item) => sum + number(item.qtdProduzido), 0))} produzidos` : `Mostrando ${visible.length} pedido(s) ${filter === "Finalizados" ? "concluído(s), mais recentes primeiro" : "em ordem crescente de data"}`}</span><span>{active === "Relatórios" ? "Edição protegida contra alterações simultâneas" : active === "Programação PCP" ? (pcpView === "Programadas" ? "Selecione uma OP para reprogramar" : "Programação habilitada com confirmação") : active === "Produção" ? "Apontamento real habilitado" : filter === "Finalizados" ? "Histórico com opção de reabrir" : "Edição e conclusão de OP habilitadas"}</span></footer>}
         </section>}
       </div>
@@ -557,7 +594,7 @@ export default function Home() {
       {editing
         ? <EditOrderForm order={selected} clients={data.clients} products={data.products} materials={data.materials} saving={saving} onSave={updateOrder} onCancel={() => setEditing(false)} />
         : active === "Programação PCP"
-        ? <ProgrammingForm order={selected} machines={data.machines} saving={saving} onSave={programOrder} />
+        ? <ProgrammingForm order={selected} machines={data.machines} saving={saving} onSave={programOrder} onReturnToWaiting={returnOrderToWaiting} />
         : active === "Produção" || active === "Lançamentos"
         ? <ProductionForm order={selected} machine={data.machines.find(machine => machine.id === selected.maquinaId)} records={data.records.filter(record => record.idPedido === selected.id && record.maquinaId === selected.maquinaId)} operators={data.operators} saving={saving} onSave={registerProduction} />
         : <OrderManagement order={selected} records={data.records} machines={data.machines} saving={saving} onEdit={() => setEditing(true)} onFinish={closure => changeOrderState(selected,"finish",closure)} onReopen={closure => changeOrderState(selected,"reopen",closure)} />}
@@ -645,7 +682,7 @@ function PcpCategorySummary({items}:{items:{category:ProductCategory;label:strin
   const totalOrders = items.reduce((sum,item) => sum + item.orders,0);
   if (!items.length) return null;
   return <section className="pcp-category-summary" aria-label="Resumo da fila por categoria">
-    <header><div><strong>Resumo por categoria</strong><span>Quilos programados nos pedidos exibidos na fila</span></div><div className="pcp-category-total"><small>Total geral</small><strong>{kg(totalKg)}</strong><span>{totalOrders} pedido(s)</span></div></header>
+    <header><div><strong>Resumo por categoria</strong><span>Quilos dos pedidos exibidos na fila</span></div><div className="pcp-category-total"><small>Total geral</small><strong>{kg(totalKg)}</strong><span>{totalOrders} pedido(s)</span></div></header>
     <div className="pcp-category-grid">{items.map(item => <article key={item.category} className={`pcp-category-card category-${item.category.toLocaleLowerCase("pt-BR").replace(/_/g,"-")}`}>
       <span>{item.label}</span><strong>{kg(item.totalKg)}</strong><small>{item.orders} pedido(s)</small>
     </article>)}</div>
@@ -1166,7 +1203,7 @@ function OrderRow({order,totals,onOpen}:{order:Order;totals:Totals;onOpen:()=>vo
     <td><button className="more" onClick={onOpen}>•••</button></td></tr>;
 }
 
-function ProgrammingForm({order,machines,saving,onSave}:{order:Order;machines:Machine[];saving:boolean;onSave:(order:Order,machineId:string,priority:boolean)=>void}) {
+function ProgrammingForm({order,machines,saving,onSave,onReturnToWaiting}:{order:Order;machines:Machine[];saving:boolean;onSave:(order:Order,machineId:string,priority:boolean)=>void;onReturnToWaiting:(order:Order)=>void}) {
   const [machineId, setMachineId] = useState(order.maquinaId || "");
   const [priority, setPriority] = useState(Boolean((order as Order & { prioridade?: number }).prioridade));
   const currentMachine = machines.find(machine => machine.id === order.maquinaId);
@@ -1178,6 +1215,10 @@ function ProgrammingForm({order,machines,saving,onSave}:{order:Order;machines:Ma
     if (changedMachine && !window.confirm(`Reprogramar esta OP de ${currentMachine?.name} (${currentMachine?.setor}) para ${machines.find(machine => machine.id === machineId)?.name}? Os apontamentos já realizados serão preservados.`)) return;
     onSave(order,machineId,priority);
   }
+  function confirmReturnToWaiting() {
+    if (!window.confirm(`Retirar esta OP da fila de ${currentMachine?.name} e retornar para Aguardando Programação? Todo o histórico produzido será preservado.`)) return;
+    onReturnToWaiting(order);
+  }
   return <section className="programming-card">
     <div className="programming-title"><div><p className="eyebrow">{isReprogramming ? "REPROGRAMAÇÃO PCP" : "PROGRAMAÇÃO PCP"}</p><h3>{isReprogramming ? "Transferir OP para outra máquina/setor" : "Definir próxima máquina"}</h3></div><span>Gravação real</span></div>
     {isReprogramming && <div className="programming-route"><div><small>ATUAL</small><strong>{currentMachine?.name}</strong><span>{currentMachine?.setor}</span></div><b>→</b><div className={changedMachine ? "destination selected" : "destination"}><small>NOVO DESTINO</small><strong>{machines.find(machine => machine.id === machineId)?.name || "Selecione"}</strong><span>{machines.find(machine => machine.id === machineId)?.setor || "Máquina / setor"}</span></div></div>}
@@ -1187,6 +1228,7 @@ function ProgrammingForm({order,machines,saving,onSave}:{order:Order;machines:Ma
     </select></label>
     <label className="priority-check"><input type="checkbox" checked={priority} onChange={event => setPriority(event.target.checked)} /><span><strong>Marcar como prioridade</strong><small>Destaca esta OP na fila da máquina.</small></span></label>
     <button className="primary-action" disabled={!machineId || saving || (isReprogramming && !changedMachine && priority === Boolean(order.prioridade))} onClick={confirmProgramming}>{saving ? "Salvando..." : isReprogramming ? "Confirmar reprogramação" : "Confirmar programação"}</button>
+    {isReprogramming && <button className="return-waiting-action" disabled={saving} onClick={confirmReturnToWaiting}>← Retornar para Aguardando Programação</button>}
     <p className="save-warning">{isReprogramming ? "A OP sairá da fila atual e entrará na nova máquina. Todo o histórico produzido continuará vinculado à OP e ao setor onde foi realizado." : "Ao confirmar, o pedido sai de “Aguardando programação” e entra na fila da máquina selecionada."}</p>
   </section>;
 }
