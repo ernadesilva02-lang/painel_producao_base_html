@@ -1,0 +1,8 @@
+{
+  "name": "Remix FORPACK Gestão Industrial",
+  "description": "Painel de controle industrial para PCP, apontamento de produção por setor, controle de prazos e relatórios.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

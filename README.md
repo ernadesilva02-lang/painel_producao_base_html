@@ -1,41 +1,20 @@
-# Painel de Produção — Versão 11
+<div align="center">
+<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
+</div>
 
-Versão preparada para publicação com GitHub e Vercel usando Next.js.
+# Run and deploy your AI Studio app
 
-## Principais melhorias incluídas
+This contains everything you need to run your app locally.
 
-- Programação PCP por máquina e por data do pedido.
-- Sequência manual com controles para subir e descer pedidos.
-- Menu de três pontos para alteração de máquina.
-- Coluna de quantidade produzida destacada em verde.
-- Descrição ampliada sem quebra de texto.
-- Categorias de produto, filtro e totais em kg também na fila aguardando.
-- Impressão da fila aguardando conforme categoria e busca aplicadas.
-- Impressão da fila programada com data do pedido e resumo por categoria.
-- Retorno de uma OP programada para Aguardando Programação, preservando todo o histórico produzido.
-- Central de Prazos com agenda diária por capacidade da máquina.
-- Capacidade inicial da EF1 em 2.500 kg por 24 horas.
-- Divisão automática de pedidos entre os dias de produção.
+View your app in AI Studio: https://ai.studio/apps/843da33e-0cfc-436f-8a5c-f80edb3f4d70
 
-## Publicação
+## Run Locally
 
-1. Extraia o ZIP no computador.
-2. Envie o conteúdo da pasta extraída para a raiz da branch `main` do GitHub.
-3. Substitua os arquivos existentes com os mesmos nomes.
-4. Não envie o arquivo ZIP, a pasta `node_modules` nem a pasta `.next`.
-5. Aguarde a Vercel concluir o deploy automático.
+**Prerequisites:**  Node.js
 
-## Configuração da Vercel
 
-- Framework Preset: `Next.js`
-- Build Command: padrão (`npm run build`)
-- Output Directory: vazio
-- Install Command: padrão
-- Root Directory: vazio
-
-## Desenvolvimento local
-
-```bash
-npm install
-npm run dev
-```
+1. Install dependencies:
+   `npm install`
+2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
+3. Run the app:
+   `npm run dev`
