@@ -19,9 +19,13 @@ export interface EtiquetaZebraData {
   tipoFilme: string;      // Ex: "FILME PEBD LISO"
   aplicacao: string;      // Ex: "P/ POLPAS DE FRUTA"
   medidas: string;        // Ex: "30x0,08"
-  dataImpressao: string;  // Ex: "16/07/2026"
-  tamanhoEtiqueta: "60x40" | "70x50" | "100x50";
-  imprimirPesos: boolean; // Se true imprime "10.7 / 10.1", se false imprime "_____ / _____"
+  dataImpressao: string;  // Ex: "22/09/2026"
+  tamanhoEtiqueta: "43x24" | "60x40" | "70x50" | "100x50" | "custom";
+  larguraMm?: number;     // Ex: 43
+  alturaMm?: number;      // Ex: 24
+  orientacao: "horizontal" | "vertical" | "rotacionada_90"; // horizontal padrão da fábrica
+  formatoRolo: "1_coluna" | "2_colunas"; // Rolo de 1 coluna ou 2 colunas lado a lado (pistas duplas)
+  imprimirPesos: boolean; // Se true imprime "40.0 / 43.4", se false imprime "_____ / _____"
   incluirIdentificacaoOp?: boolean; // OP #9479 · BOBINA #01
   codigoOp?: string;
   numeroPalete?: string;
@@ -85,7 +89,11 @@ export function inferEtiquetaZebraData(
     aplicacao: aplicacao || "P/ POLPAS DE FRUTA",
     medidas: medidas || "30x0,08",
     dataImpressao: dataFormatada,
-    tamanhoEtiqueta: "60x40",
+    tamanhoEtiqueta: "43x24", // 4,30 cm x 2,40 cm - Padrão Real da Fábrica Forpack
+    larguraMm: 43,
+    alturaMm: 24,
+    orientacao: "horizontal",
+    formatoRolo: "1_coluna",
     imprimirPesos: true,
     incluirIdentificacaoOp: true,
     codigoOp: order?.numeroOp || order?.numeroPedido || palete?.numeroOp || "",
@@ -95,7 +103,7 @@ export function inferEtiquetaZebraData(
 
 /**
  * Função de impressão direta da Etiqueta Térmica Zebra via janela/iframe do navegador
- * Configurada com @page { size: 60mm 40mm; margin: 0; } para envio perfeito a impressoras térmicas
+ * Configurada para o formato 43x24mm (4,30 x 2,40 cm) na Horizontal (Paisagem)
  */
 export function printEtiquetasZebra(
   itens: EtiquetaBobinaItem[],
@@ -121,15 +129,42 @@ export function printEtiquetasZebra(
   printDoc.open();
 
   // Dimensões CSS de acordo com o tamanho selecionado
-  const dimensionsMap = {
-    "60x40": { width: "60mm", height: "40mm", padding: "2.5mm 3.5mm" },
-    "70x50": { width: "70mm", height: "50mm", padding: "3mm 4mm" },
-    "100x50": { width: "100mm", height: "50mm", padding: "3.5mm 5mm" },
+  const dimensionsMap: Record<
+    string,
+    { widthMm: number; heightMm: number; padding: string }
+  > = {
+    "43x24": { widthMm: 43, heightMm: 24, padding: "1mm 1.5mm" },
+    "60x40": { widthMm: 60, heightMm: 40, padding: "2mm 3mm" },
+    "70x50": { widthMm: 70, heightMm: 50, padding: "2.5mm 3.5mm" },
+    "100x50": { widthMm: 100, heightMm: 50, padding: "3mm 4mm" },
+    "custom": {
+      widthMm: config.larguraMm || 43,
+      heightMm: config.alturaMm || 24,
+      padding: "1mm 1.5mm",
+    },
   };
-  const dim = dimensionsMap[config.tamanhoEtiqueta] || dimensionsMap["60x40"];
 
-  // Se a lista estiver vazia (ex: impressão prévia em branco de 1 ou N etiquetas)
-  const itensToPrint: EtiquetaBobinaItem[] =
+  const dimBase = dimensionsMap[config.tamanhoEtiqueta] || dimensionsMap["43x24"];
+  const is2Col = config.formatoRolo === "2_colunas";
+  const isRotated90 = config.orientacao === "rotacionada_90";
+  const isVertical = config.orientacao === "vertical";
+
+  // Largura e altura da página
+  const singleWidthMm = dimBase.widthMm;
+  const singleHeightMm = dimBase.heightMm;
+
+  let pageWidthMm = is2Col ? singleWidthMm * 2 + 2 : singleWidthMm;
+  let pageHeightMm = singleHeightMm;
+
+  if (isVertical) {
+    pageWidthMm = singleHeightMm;
+    pageHeightMm = is2Col ? singleWidthMm * 2 + 2 : singleWidthMm;
+  }
+
+  const pageSizeStyle = `${pageWidthMm}mm ${pageHeightMm}mm`;
+
+  // Se a lista estiver vazia (ex: impressão prévia em branco)
+  const baseItens: EtiquetaBobinaItem[] =
     itens.length > 0
       ? itens
       : [
@@ -141,15 +176,93 @@ export function printEtiquetasZebra(
           },
         ];
 
+  // Helper para renderizar 1 etiqueta individual
+  const renderCardHtml = (item: EtiquetaBobinaItem | null) => {
+    if (!item) {
+      return `<div class="etiqueta-zebra-card vazio" style="width: ${singleWidthMm}mm; height: ${singleHeightMm}mm; visibility: hidden;"></div>`;
+    }
+
+    const pesoStr =
+      config.imprimirPesos && item.pesoBruto > 0
+        ? `${item.pesoBruto.toFixed(1)} / ${item.pesoLiquido.toFixed(1)}`
+        : `_____ / _____`;
+
+    const isSmall = singleWidthMm <= 50 || singleHeightMm <= 30;
+
+    return `
+    <div class="etiqueta-zebra-card ${isRotated90 ? "rot-90" : ""}" style="width: ${singleWidthMm}mm; height: ${singleHeightMm}mm; padding: ${dimBase.padding};">
+      <div class="header-group">
+        <div class="line-material ${isSmall ? "text-compact-mat" : ""}">${config.tipoFilme}</div>
+        <div class="line-aplicacao ${isSmall ? "text-compact-app" : ""}">${config.aplicacao}</div>
+        <div class="line-medidas ${isSmall ? "text-compact-med" : ""}">${config.medidas}</div>
+      </div>
+
+      <div class="line-peso ${isSmall ? "text-compact-peso" : ""}">
+        <span class="peso-label">PESO:</span>
+        ${
+          config.imprimirPesos && item.pesoBruto > 0
+            ? `<span class="peso-values">${pesoStr}</span>`
+            : `<span class="peso-blank">${pesoStr}</span>`
+        }
+      </div>
+
+      <div class="footer-group">
+        <div class="line-footer">
+          <span class="footer-data ${isSmall ? "text-compact-dt" : ""}">DT: ${config.dataImpressao}</span>
+          <div class="footer-logo">
+            <span class="footer-logo-circle ${isSmall ? "logo-circle-sm" : ""}">f</span>
+            <span class="footer-logo-name ${isSmall ? "logo-name-sm" : ""}">Forpack</span>
+          </div>
+        </div>
+        ${
+          config.incluirIdentificacaoOp && (config.codigoOp || item.codigoBobina)
+            ? `<div class="trace-line ${isSmall ? "trace-line-sm" : ""}">OP #${config.codigoOp || "—"} · ${item.codigoBobina || `BOB #${item.posicao}`} ${config.numeroPalete ? `· ${config.numeroPalete}` : ""}</div>`
+            : ""
+        }
+      </div>
+    </div>`;
+  };
+
+  // Se for 2 colunas, agrupamos os itens de 2 em 2
+  let bodyContent = "";
+  if (is2Col) {
+    for (let i = 0; i < baseItens.length; i += 2) {
+      const item1 = baseItens[i];
+      const item2 = baseItens[i + 1] || null;
+      bodyContent += `
+      <div class="etiqueta-page-row" style="width: ${pageWidthMm}mm; height: ${pageHeightMm}mm;">
+        ${renderCardHtml(item1)}
+        <div class="col-gap" style="width: 2mm;"></div>
+        ${renderCardHtml(item2)}
+      </div>`;
+    }
+  } else {
+    bodyContent = baseItens
+      .map((item) => `<div class="etiqueta-page-single" style="width: ${pageWidthMm}mm; height: ${pageHeightMm}mm;">${renderCardHtml(item)}</div>`)
+      .join("");
+  }
+
   printDoc.write(`<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
   <meta charset="utf-8" />
-  <title>Etiqueta Bobina Zebra - Forpack</title>
+  <title>Etiqueta Bobina 43x24mm - Forpack</title>
   <style>
     @page {
-      size: ${dim.width} ${dim.height};
+      size: ${pageSizeStyle};
       margin: 0;
+    }
+    @media print {
+      @page {
+        size: ${pageSizeStyle};
+        margin: 0;
+      }
+      html, body {
+        margin: 0 !important;
+        padding: 0 !important;
+        width: ${pageWidthMm}mm !important;
+        height: ${pageHeightMm}mm !important;
+      }
     }
     * {
       box-sizing: border-box;
@@ -162,160 +275,203 @@ export function printEtiquetasZebra(
       background: #fff;
       color: #000;
       font-family: Arial, "Helvetica Neue", Helvetica, sans-serif;
+      -webkit-font-smoothing: antialiased;
     }
-    .etiqueta-zebra-card {
-      width: ${dim.width};
-      height: ${dim.height};
+    .etiqueta-page-single {
       page-break-after: always;
       break-after: page;
       overflow: hidden;
-      padding: ${dim.padding};
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .etiqueta-page-single:last-child {
+      page-break-after: avoid;
+      break-after: avoid;
+    }
+    .etiqueta-page-row {
+      display: flex;
+      flex-direction: row;
+      align-items: center;
+      justify-content: space-between;
+      page-break-after: always;
+      break-after: page;
+      overflow: hidden;
+    }
+    .etiqueta-page-row:last-child {
+      page-break-after: avoid;
+      break-after: avoid;
+    }
+    .etiqueta-zebra-card {
+      box-sizing: border-box;
+      overflow: hidden;
       display: flex;
       flex-direction: column;
       justify-content: space-between;
       text-align: center;
       position: relative;
+      background: #fff;
     }
-    .etiqueta-zebra-card:last-child {
-      page-break-after: avoid;
-      break-after: avoid;
+    .etiqueta-zebra-card.rot-90 {
+      transform: rotate(90deg);
+      transform-origin: center center;
+    }
+    .header-group {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      gap: 0.5px;
     }
     .line-material {
-      font-size: 13.5px;
+      font-size: 11px;
       font-weight: 900;
-      letter-spacing: 0.2px;
+      letter-spacing: 0.1px;
       text-transform: uppercase;
-      line-height: 1.15;
-      margin-top: 1px;
+      line-height: 1.05;
+      margin: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 100%;
+    }
+    .text-compact-mat {
+      font-size: 8.5px !important;
+      font-weight: 900 !important;
+      line-height: 1 !important;
     }
     .line-aplicacao {
-      font-size: 11.5px;
+      font-size: 9.5px;
       font-weight: 800;
       text-transform: uppercase;
-      line-height: 1.15;
-      margin-top: 2px;
+      line-height: 1.05;
+      margin: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 100%;
+    }
+    .text-compact-app {
+      font-size: 7.2px !important;
+      font-weight: 800 !important;
+      line-height: 1 !important;
     }
     .line-medidas {
-      font-size: 14.5px;
+      font-size: 12px;
       font-weight: 900;
-      letter-spacing: 0.5px;
-      line-height: 1.15;
-      margin-top: 2px;
+      letter-spacing: 0.3px;
+      line-height: 1.05;
+      margin-top: 0.5px;
+    }
+    .text-compact-med {
+      font-size: 9.2px !important;
+      font-weight: 900 !important;
+      line-height: 1 !important;
+      letter-spacing: 0.2px !important;
     }
     .line-peso {
-      font-size: 11px;
-      font-weight: 700;
-      line-height: 1.2;
-      margin-top: 2px;
+      font-size: 9.5px;
+      font-weight: 800;
+      line-height: 1;
       display: flex;
       align-items: center;
       justify-content: center;
       gap: 3px;
+      margin: 0.5px 0;
+    }
+    .text-compact-peso {
+      font-size: 8px !important;
+      line-height: 1 !important;
     }
     .line-peso .peso-label {
-      font-weight: 800;
+      font-weight: 900;
     }
     .line-peso .peso-values {
-      font-size: 13px;
+      font-size: 1.05em;
       font-weight: 900;
-      font-family: Arial, "Courier New", monospace;
-      letter-spacing: 0.5px;
+      font-family: Arial, monospace;
+      letter-spacing: 0.2px;
     }
     .line-peso .peso-blank {
-      font-size: 12px;
-      letter-spacing: 1px;
+      font-size: 0.95em;
+      letter-spacing: 0.5px;
       font-weight: bold;
+    }
+    .footer-group {
+      display: flex;
+      flex-direction: column;
+      width: 100%;
     }
     .line-footer {
       display: flex;
       justify-content: space-between;
       align-items: flex-end;
       width: 100%;
-      padding-top: 2px;
-      margin-top: auto;
+      padding-top: 0.5px;
+      line-height: 1;
     }
     .footer-data {
-      font-size: 10px;
+      font-size: 8px;
       font-weight: 800;
-      letter-spacing: 0.2px;
+      letter-spacing: 0.1px;
+    }
+    .text-compact-dt {
+      font-size: 6.8px !important;
+      font-weight: 800 !important;
     }
     .footer-logo {
       display: flex;
       align-items: center;
-      gap: 3px;
+      gap: 2px;
     }
     .footer-logo-circle {
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      width: 14px;
-      height: 14px;
+      width: 11px;
+      height: 11px;
       background: #000;
       color: #fff;
       border-radius: 50%;
-      font-size: 10px;
+      font-size: 8px;
       font-weight: 900;
       font-family: Georgia, serif;
       line-height: 1;
-      padding-bottom: 1px;
+      padding-bottom: 0.5px;
+    }
+    .logo-circle-sm {
+      width: 9.5px !important;
+      height: 9.5px !important;
+      font-size: 6.8px !important;
     }
     .footer-logo-name {
-      font-size: 11.5px;
+      font-size: 9px;
       font-weight: 900;
       letter-spacing: -0.3px;
     }
+    .logo-name-sm {
+      font-size: 7.8px !important;
+    }
     .trace-line {
-      font-size: 7.5px;
-      color: #333;
+      font-size: 6.5px;
+      color: #222;
       font-family: monospace;
       letter-spacing: -0.2px;
       line-height: 1;
-      margin-top: 1px;
+      margin-top: 0.5px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      text-align: center;
+    }
+    .trace-line-sm {
+      font-size: 5.5px !important;
+      line-height: 1 !important;
     }
   </style>
 </head>
 <body>
-  ${itensToPrint
-    .map((item) => {
-      const pesoStr = config.imprimirPesos && item.pesoBruto > 0
-        ? `${item.pesoBruto.toFixed(1)} / ${item.pesoLiquido.toFixed(1)}`
-        : `_____ / _____`;
-
-      return `
-      <div class="etiqueta-zebra-card">
-        <div>
-          <div class="line-material">${config.tipoFilme}</div>
-          <div class="line-aplicacao">${config.aplicacao}</div>
-          <div class="line-medidas">${config.medidas}</div>
-        </div>
-
-        <div class="line-peso">
-          <span class="peso-label">PESO:</span>
-          ${
-            config.imprimirPesos && item.pesoBruto > 0
-              ? `<span class="peso-values">${pesoStr}</span>`
-              : `<span class="peso-blank">${pesoStr}</span>`
-          }
-        </div>
-
-        <div>
-          <div class="line-footer">
-            <span class="footer-data">DT: ${config.dataImpressao}</span>
-            <div class="footer-logo">
-              <span class="footer-logo-circle">f</span>
-              <span class="footer-logo-name">Forpack</span>
-            </div>
-          </div>
-          ${
-            config.incluirIdentificacaoOp && (config.codigoOp || item.codigoBobina)
-              ? `<div class="trace-line">OP #${config.codigoOp || "—"} · ${item.codigoBobina || `BOB #${item.posicao}`} ${config.numeroPalete ? `· ${config.numeroPalete}` : ""}</div>`
-              : ""
-          }
-        </div>
-      </div>
-      `;
-    })
-    .join("")}
+  ${bodyContent}
 </body>
 </html>`);
 
@@ -332,44 +488,77 @@ export function printEtiquetasZebra(
 
 /**
  * Gera o código nativo ZPL (Zebra Programming Language) para envio direto a impressoras térmicas
+ * Calibrado em 203 DPI para etiqueta 43x24mm (344 x 192 dots) na horizontal
  */
 export function generateZplCode(
   itens: EtiquetaBobinaItem[],
   config: EtiquetaZebraData
 ): string {
   const list = itens.length > 0 ? itens : [{ posicao: 1, pesoBruto: 0, tara: 1.6, pesoLiquido: 0 }];
+  const is2Col = config.formatoRolo === "2_colunas";
+  const isRot90 = config.orientacao === "rotacionada_90";
+  const isVert = config.orientacao === "vertical";
+  const zplOrientation = isRot90 ? "^POR" : isVert ? "^POW" : "^PON";
+
+  // Dimensões em dots para 203 DPI (8 dots por mm)
+  // 43mm = 344 dots, 24mm = 192 dots
+  const widthDots = config.tamanhoEtiqueta === "60x40" ? 480 : 344;
+  const heightDots = config.tamanhoEtiqueta === "60x40" ? 320 : 192;
+  const totalWidthDots = is2Col ? widthDots * 2 + 16 : widthDots;
+
+  const buildSingleLabelZpl = (item: EtiquetaBobinaItem | null, xOffset: number) => {
+    if (!item) return "";
+    const pesoText = config.imprimirPesos && item.pesoBruto > 0
+      ? `PESO: ${item.pesoBruto.toFixed(1)} / ${item.pesoLiquido.toFixed(1)}`
+      : `PESO: _____ / _____`;
+
+    const traceText = config.incluirIdentificacaoOp
+      ? `OP #${config.codigoOp || ""} · ${item.codigoBobina || `BOB #${item.posicao}`} ${config.numeroPalete ? `· ${config.numeroPalete}` : ""}`
+      : "";
+
+    return `^CF0,20
+^FO${xOffset + 6},8^FB332,1,0,C^FD${config.tipoFilme}^FS
+^CF0,16
+^FO${xOffset + 6},32^FB332,1,0,C^FD${config.aplicacao}^FS
+^CF0,24
+^FO${xOffset + 6},52^FB332,1,0,C^FD${config.medidas}^FS
+^CF0,20
+^FO${xOffset + 6},82^FB332,1,0,C^FD${pesoText}^FS
+^CF0,16
+^FO${xOffset + 10},122^FDDT: ${config.dataImpressao}^FS
+^FO${xOffset + 240},118^GB16,16,16,B,0^FS
+^CF0,14
+^FR^FO${xOffset + 245},120^FDf^FS
+^CF0,17
+^FO${xOffset + 260},120^FDForpack^FS
+${traceText ? `^CF0,12\n^FO${xOffset + 6},152^FB332,1,0,C^FD${traceText}^FS` : ""}`;
+  };
+
+  if (is2Col) {
+    const pages: string[] = [];
+    for (let i = 0; i < list.length; i += 2) {
+      const item1 = list[i];
+      const item2 = list[i + 1] || null;
+      pages.push(`^XA
+^PW${totalWidthDots}
+^LL${heightDots}
+${zplOrientation}
+^LH0,0
+${buildSingleLabelZpl(item1, 8)}
+${item2 ? buildSingleLabelZpl(item2, widthDots + 16) : ""}
+^XZ`);
+    }
+    return pages.join("\n\n");
+  }
 
   return list
     .map((item) => {
-      const pesoText = config.imprimirPesos && item.pesoBruto > 0
-        ? `PESO: ${item.pesoBruto.toFixed(1)} / ${item.pesoLiquido.toFixed(1)}`
-        : `PESO: _____ / _____`;
-
-      const traceText = config.incluirIdentificacaoOp
-        ? `OP #${config.codigoOp || ""} · ${item.codigoBobina || `BOB #${item.posicao}`} ${config.numeroPalete ? `· ${config.numeroPalete}` : ""}`
-        : "";
-
       return `^XA
-^PW480
-^LL320
-^PON
+^PW${widthDots}
+^LL${heightDots}
+${zplOrientation}
 ^LH0,0
-^CF0,34
-^FO20,20^FB440,1,0,C^FD${config.tipoFilme}^FS
-^CF0,26
-^FO20,60^FB440,1,0,C^FD${config.aplicacao}^FS
-^CF0,38
-^FO20,95^FB440,1,0,C^FD${config.medidas}^FS
-^CF0,32
-^FO20,150^FB440,1,0,C^FD${pesoText}^FS
-^CF0,25
-^FO25,215^FDDT: ${config.dataImpressao}^FS
-^FO320,210^GB24,24,24,B,0^FS
-^CF0,20
-^FR^FO327,212^FDf^FS
-^CF0,26
-^FO350,214^FDForpack^FS
-${traceText ? `^CF0,16\n^FO25,255^FD${traceText}^FS` : ""}
+${buildSingleLabelZpl(item, 6)}
 ^XZ`;
     })
     .join("\n\n");
@@ -494,8 +683,13 @@ export function EtiquetaZebraModal({
                   IMPRESSORA TÉRMICA ZEBRA
                 </span>
                 <span className="text-[9px] font-mono bg-blue-500/20 text-blue-300 px-1.5 py-0.2 rounded border border-blue-400/30 font-bold">
-                  {config.tamanhoEtiqueta} mm
+                  {config.tamanhoEtiqueta === "43x24" ? "4,30 x 2,40 cm (Horizontal)" : `${config.tamanhoEtiqueta} mm`}
                 </span>
+                {config.formatoRolo === "2_colunas" && (
+                  <span className="text-[9px] font-mono bg-amber-500/20 text-amber-300 px-1.5 py-0.2 rounded border border-amber-400/30 font-bold">
+                    2 Colunas (Pistas Duplas)
+                  </span>
+                )}
               </div>
               <h3 className="text-base font-bold text-white tracking-tight">
                 Etiqueta Adesiva de Bobina · Padrão Forpack
@@ -555,85 +749,133 @@ export function EtiquetaZebraModal({
         <div className="p-5 overflow-y-auto space-y-4 flex-1">
           {tab === "preview" && (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-5 items-start">
-              {/* CARTÃO VISUAL REALISTA DA ETIQUETA ADESIVA ZEBRA (Fiel à foto fornecida pelo usuário!) */}
+              {/* CARTÃO VISUAL REALISTA DA ETIQUETA ADESIVA ZEBRA (Fiel às fotos enviadas pelo usuário!) */}
               <div className="flex flex-col items-center">
-                <span className="text-[11px] font-bold text-slate-500 mb-2 uppercase tracking-wide">
-                  Pré-visualização Térmica (60x40mm)
-                </span>
+                <div className="flex items-center justify-between w-full mb-1.5 px-1">
+                  <span className="text-[11px] font-bold text-slate-700 uppercase tracking-wide">
+                    Pré-visualização Térmica
+                  </span>
+                  <span className="text-[10px] font-mono font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
+                    {config.tamanhoEtiqueta === "43x24" ? "4,30 cm x 2,40 cm" : `${config.tamanhoEtiqueta} mm`} · {config.orientacao === "rotacionada_90" ? "Giro 90°" : config.orientacao === "vertical" ? "Vertical" : "Horizontal"}
+                  </span>
+                </div>
 
-                <div className="p-4 bg-slate-100 rounded-xl border border-slate-300 shadow-inner flex items-center justify-center w-full">
-                  {/* SIMULAÇÃO DA ETIQUETA ADESIVA COLADA NA BOBINA */}
-                  <div
-                    className="bg-white text-slate-900 border-2 border-slate-800 rounded-lg p-3 shadow-md flex flex-col justify-between text-center select-none"
-                    style={{
-                      width: "240px",
-                      height: "160px",
-                      fontFamily: "Arial, Helvetica, sans-serif",
-                    }}
-                  >
-                    <div>
-                      {/* LINHA 1: FILME PEBD LISO */}
-                      <div className="font-black text-xs tracking-wider uppercase leading-tight line-clamp-1">
-                        {config.tipoFilme || "FILME PEBD LISO"}
-                      </div>
-                      {/* LINHA 2: P/ POLPAS DE FRUTA */}
-                      <div className="font-bold text-[11px] tracking-tight uppercase leading-tight mt-0.5 line-clamp-1">
-                        {config.aplicacao || "P/ POLPAS DE FRUTA"}
-                      </div>
-                      {/* LINHA 3: 30x0,08 */}
-                      <div className="font-black text-sm tracking-widest leading-tight mt-1">
-                        {config.medidas || "30x0,08"}
-                      </div>
-                    </div>
-
-                    {/* LINHA 4: PESO 10.7 / 10.1 (Bruto / Líquido) */}
-                    <div className="font-bold text-[11px] tracking-wide my-1 flex items-center justify-center gap-1.5">
-                      <span className="font-black">PESO:</span>
-                      {config.imprimirPesos && previewBobina.pesoBruto > 0 ? (
-                        <span className="font-black text-xs font-mono bg-blue-50 text-blue-900 px-1 rounded">
-                          {previewBobina.pesoBruto.toFixed(1)} / {previewBobina.pesoLiquido.toFixed(1)}
-                        </span>
-                      ) : (
-                        <span className="font-mono text-slate-400 text-xs tracking-widest font-normal">
-                          _____ / _____
-                        </span>
-                      )}
-                    </div>
-
-                    {/* LINHA 5: DT: 16/07/2026 (f) Forpack */}
-                    <div>
-                      <div className="flex items-center justify-between pt-1 border-t border-slate-200">
-                        <span className="font-bold text-[9.5px]">
-                          DT: {config.dataImpressao}
-                        </span>
-                        <div className="flex items-center gap-1">
-                          <span className="w-3.5 h-3.5 bg-black text-white rounded-full flex items-center justify-center font-bold font-serif text-[8.5px] leading-none">
-                            f
-                          </span>
-                          <span className="font-black text-[10px] tracking-tight">
-                            Forpack
-                          </span>
+                <div className="p-4 bg-slate-100 rounded-xl border border-slate-300 shadow-inner flex flex-col items-center justify-center w-full gap-2">
+                  {/* SIMULAÇÃO DA ETIQUETA ADESIVA (PROPORÇÃO EXATA 43:24 HORIZONTAL) */}
+                  <div className="flex items-center justify-center gap-2">
+                    {/* ETIQUETA 1 (OU ÚNICA) */}
+                    <div
+                      className="bg-white text-slate-900 border-2 border-slate-800 rounded-md p-2 shadow-md flex flex-col justify-between text-center select-none"
+                      style={{
+                        width: config.orientacao === "vertical" ? "156px" : "270px",
+                        height: config.orientacao === "vertical" ? "270px" : "156px",
+                        fontFamily: "Arial, Helvetica, sans-serif",
+                      }}
+                    >
+                      <div>
+                        {/* LINHA 1: FILME PEBD LISO */}
+                        <div className="font-black text-[11.5px] tracking-wide uppercase leading-tight truncate">
+                          {config.tipoFilme || "FILME PEBD LISO"}
+                        </div>
+                        {/* LINHA 2: P/ POLPAS DE FRUTA */}
+                        <div className="font-bold text-[10px] tracking-tight uppercase leading-tight mt-0.5 truncate text-slate-800">
+                          {config.aplicacao || "P/ POLPAS DE FRUTA"}
+                        </div>
+                        {/* LINHA 3: 30x0,08 */}
+                        <div className="font-black text-[13px] tracking-wider leading-tight mt-1">
+                          {config.medidas || "30x0,08"}
                         </div>
                       </div>
-                      {config.incluirIdentificacaoOp && (
-                        <div className="text-[7.5px] text-slate-400 font-mono tracking-tighter mt-0.5 truncate">
-                          OP #{config.codigoOp || "—"} · {previewBobina.codigoBobina || `BOB #${previewBobina.posicao}`}
+
+                      {/* LINHA 4: PESO 40.0 / 43.4 (Bruto / Líquido) */}
+                      <div className="font-bold text-[11px] tracking-wide my-1 flex items-center justify-center gap-1.5">
+                        <span className="font-black text-slate-900">PESO:</span>
+                        {config.imprimirPesos && previewBobina.pesoBruto > 0 ? (
+                          <span className="font-black text-[12px] font-mono bg-blue-50 text-blue-900 px-1.5 py-0.5 rounded border border-blue-200">
+                            {previewBobina.pesoBruto.toFixed(1)} / {previewBobina.pesoLiquido.toFixed(1)}
+                          </span>
+                        ) : (
+                          <span className="font-mono text-slate-400 text-xs tracking-widest font-normal">
+                            _____ / _____
+                          </span>
+                        )}
+                      </div>
+
+                      {/* LINHA 5: DT: 22/09/2026 (f) Forpack */}
+                      <div>
+                        <div className="flex items-center justify-between pt-1 border-t border-slate-200">
+                          <span className="font-bold text-[9px] text-slate-800">
+                            DT: {config.dataImpressao}
+                          </span>
+                          <div className="flex items-center gap-1">
+                            <span className="w-3.5 h-3.5 bg-black text-white rounded-full flex items-center justify-center font-bold font-serif text-[8.5px] leading-none pb-0.5">
+                              f
+                            </span>
+                            <span className="font-black text-[10px] tracking-tight text-slate-900">
+                              Forpack
+                            </span>
+                          </div>
                         </div>
-                      )}
+                        {config.incluirIdentificacaoOp && (
+                          <div className="text-[7.5px] text-slate-500 font-mono tracking-tighter mt-0.5 truncate">
+                            OP #{config.codigoOp || "—"} · {previewBobina.codigoBobina || `BOB #${previewBobina.posicao}`}
+                          </div>
+                        )}
+                      </div>
                     </div>
+
+                    {/* SE FOR ROLO DE 2 COLUNAS, MOSTRA A SEGUNDA ETIQUETA IRMÃ */}
+                    {config.formatoRolo === "2_colunas" && (
+                      <div
+                        className="bg-white/80 text-slate-700 border-2 border-dashed border-slate-400 rounded-md p-2 shadow-xs flex flex-col justify-between text-center select-none opacity-85 hidden sm:flex"
+                        style={{
+                          width: config.orientacao === "vertical" ? "156px" : "270px",
+                          height: config.orientacao === "vertical" ? "270px" : "156px",
+                          fontFamily: "Arial, Helvetica, sans-serif",
+                        }}
+                      >
+                        <div>
+                          <div className="font-black text-[11.5px] tracking-wide uppercase leading-tight truncate">
+                            {config.tipoFilme || "FILME PEBD LISO"}
+                          </div>
+                          <div className="font-bold text-[10px] tracking-tight uppercase leading-tight mt-0.5 truncate">
+                            {config.aplicacao || "P/ POLPAS DE FRUTA"}
+                          </div>
+                          <div className="font-black text-[13px] tracking-wider leading-tight mt-1">
+                            {config.medidas || "30x0,08"}
+                          </div>
+                        </div>
+
+                        <div className="font-bold text-[11px] tracking-wide my-1 flex items-center justify-center gap-1.5">
+                          <span className="font-black">PESO:</span>
+                          <span className="font-black text-[12px] font-mono bg-slate-100 text-slate-700 px-1.5 py-0.5 rounded border border-slate-300">
+                            {allBobinas[1] ? `${allBobinas[1].pesoBruto.toFixed(1)} / ${allBobinas[1].pesoLiquido.toFixed(1)}` : "40.0 / 43.4"}
+                          </span>
+                        </div>
+
+                        <div>
+                          <div className="flex items-center justify-between pt-1 border-t border-slate-200">
+                            <span className="font-bold text-[9px]">DT: {config.dataImpressao}</span>
+                            <div className="flex items-center gap-1">
+                              <span className="w-3.5 h-3.5 bg-black text-white rounded-full flex items-center justify-center font-bold font-serif text-[8.5px] leading-none pb-0.5">
+                                f
+                              </span>
+                              <span className="font-black text-[10px] tracking-tight">Forpack</span>
+                            </div>
+                          </div>
+                          {config.incluirIdentificacaoOp && (
+                            <div className="text-[7.5px] text-slate-500 font-mono tracking-tighter mt-0.5 truncate">
+                              OP #{config.codigoOp || "—"} · {allBobinas[1]?.codigoBobina || "BOB #02"}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
 
-                <div className="mt-2 text-center text-[11px] text-slate-500">
-                  {config.imprimirPesos ? (
-                    <span className="text-emerald-700 font-medium">
-                      ✓ Peso impresso automaticamente pelo sistema (sem rasuras de caneta).
-                    </span>
-                  ) : (
-                    <span className="text-amber-700 font-medium">
-                      ✎ Etiqueta prévia com espaço para peso manual.
-                    </span>
-                  )}
+                <div className="mt-2.5 p-2 bg-emerald-50 border border-emerald-200 rounded-lg text-center text-[11px] text-emerald-800 w-full">
+                  <strong>✓ Formato Calibrado:</strong> Largura <strong>4,30 cm</strong> x Altura <strong>2,40 cm</strong> na <strong>Horizontal</strong> (compatível com a foto do rolo).
                 </div>
               </div>
 
@@ -641,7 +883,7 @@ export function EtiquetaZebraModal({
               <div className="space-y-3 bg-slate-50 p-3.5 rounded-xl border border-slate-200 text-xs">
                 <div className="flex items-center justify-between">
                   <span className="font-bold text-slate-700 uppercase tracking-wide text-[10px]">
-                    Campos da Etiqueta
+                    Campos & Configuração da Impressão
                   </span>
                   <button
                     type="button"
@@ -651,6 +893,74 @@ export function EtiquetaZebraModal({
                     <RotateCcw className="w-3 h-3" />
                     <span>Redefinir da OP</span>
                   </button>
+                </div>
+
+                {/* Tamanho da etiqueta térmica */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                      Tamanho da Etiqueta
+                    </label>
+                    <select
+                      value={config.tamanhoEtiqueta}
+                      onChange={(e) => setConfig({ ...config, tamanhoEtiqueta: e.target.value as any })}
+                      className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-md text-xs font-bold text-blue-900 focus:ring-1 focus:ring-blue-500"
+                    >
+                      <option value="43x24">4,30 x 2,40 cm (Padrão Fábrica Forpack)</option>
+                      <option value="60x40">60 mm x 40 mm (Médio)</option>
+                      <option value="70x50">70 mm x 50 mm</option>
+                      <option value="100x50">100 mm x 50 mm (Largo)</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                      Orientação
+                    </label>
+                    <select
+                      value={config.orientacao}
+                      onChange={(e) => setConfig({ ...config, orientacao: e.target.value as any })}
+                      className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-md text-xs font-semibold text-slate-800"
+                    >
+                      <option value="horizontal">Horizontal / Paisagem (Padrão 4,3x2,4cm)</option>
+                      <option value="rotacionada_90">Girar 90° (Caso saia vertical na impressora)</option>
+                      <option value="vertical">Vertical / Retrato</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* Formato do Rolo (1 coluna vs 2 colunas / pistas duplas) */}
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                    Disposição no Rolo de Etiquetas
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setConfig({ ...config, formatoRolo: "1_coluna" })}
+                      className={`p-2 rounded-lg border text-left cursor-pointer transition ${
+                        config.formatoRolo === "1_coluna"
+                          ? "bg-blue-50 border-blue-600 text-blue-900 ring-1 ring-blue-500"
+                          : "bg-white border-slate-300 text-slate-700 hover:bg-slate-100"
+                      }`}
+                    >
+                      <strong className="block text-xs">1 Coluna (43 mm)</strong>
+                      <span className="text-[10px] text-slate-500">1 etiqueta por avanço</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setConfig({ ...config, formatoRolo: "2_colunas" })}
+                      className={`p-2 rounded-lg border text-left cursor-pointer transition ${
+                        config.formatoRolo === "2_colunas"
+                          ? "bg-blue-50 border-blue-600 text-blue-900 ring-1 ring-blue-500"
+                          : "bg-white border-slate-300 text-slate-700 hover:bg-slate-100"
+                      }`}
+                    >
+                      <strong className="block text-xs">2 Colunas (88 mm)</strong>
+                      <span className="text-[10px] text-slate-500">2 pistas lado a lado (Foto 1)</span>
+                    </button>
+                  </div>
                 </div>
 
                 {/* Tipo de Filme */}
@@ -681,7 +991,7 @@ export function EtiquetaZebraModal({
                   />
                 </div>
 
-                {/* Medidas */}
+                {/* Medidas e Data */}
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <label className="block text-[11px] font-semibold text-slate-600 mb-1">
@@ -734,22 +1044,6 @@ export function EtiquetaZebraModal({
                       Incluir rodapé de rastreio (OP nº e Bobina #)
                     </span>
                   </label>
-                </div>
-
-                {/* Tamanho da etiqueta térmica */}
-                <div>
-                  <label className="block text-[11px] font-semibold text-slate-600 mb-1">
-                    Formato do Rolo Zebra
-                  </label>
-                  <select
-                    value={config.tamanhoEtiqueta}
-                    onChange={(e) => setConfig({ ...config, tamanhoEtiqueta: e.target.value as any })}
-                    className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-md text-xs font-semibold text-slate-800"
-                  >
-                    <option value="60x40">60 mm x 40 mm (Padrão Forpack / Foto)</option>
-                    <option value="70x50">70 mm x 50 mm (Médio)</option>
-                    <option value="100x50">100 mm x 50 mm (Largo)</option>
-                  </select>
                 </div>
               </div>
             </div>
@@ -929,8 +1223,9 @@ export function EtiquetaZebraModal({
         {/* RODAPÉ DE AÇÃO */}
         <div className="bg-slate-50 border-t border-slate-200 px-5 py-3 flex items-center justify-between shrink-0">
           <div className="text-xs text-slate-600">
-            Serão impressas: <strong>{targetItens.length} etiqueta(s)</strong> no rolo{" "}
-            <strong>{config.tamanhoEtiqueta} mm</strong>
+            Serão impressas: <strong>{targetItens.length} etiqueta(s)</strong> ·{" "}
+            <strong>{config.tamanhoEtiqueta === "43x24" ? "4,30 x 2,40 cm (Horizontal)" : `${config.tamanhoEtiqueta} mm`}</strong>
+            {config.formatoRolo === "2_colunas" ? " · Rolo 2 Colunas" : ""}
           </div>
 
           <div className="flex items-center gap-2">
