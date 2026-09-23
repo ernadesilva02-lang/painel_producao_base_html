@@ -10,6 +10,7 @@ import {
   ProductCategory,
   PRODUCT_CATEGORIES,
   StatusEvent,
+  PaleteRomaneio,
 } from "./types/forpack";
 import {
   json,
@@ -29,6 +30,8 @@ import {
   saveProduction,
   updateProduction,
   saveRegistry,
+  savePalete,
+  deletePalete,
 } from "./services/supabaseApi";
 import {
   LayoutDashboard,
@@ -45,8 +48,13 @@ import {
   RotateCw,
   Search,
   Menu as MenuIcon,
+  Database,
+  Coins,
 } from "lucide-react";
 
+import { DatabaseMigrationModal } from "./components/DatabaseMigrationModal";
+import { TechnicalClosureModal } from "./components/TechnicalClosureModal";
+import { CostAndSuppliesView } from "./components/CostAndSuppliesView";
 import { PcpCategorySummary, PcpQueueTable } from "./components/PcpQueueTable";
 import { RegistryPanel } from "./components/RegistryPanel";
 import { DailyLaunches, Metric } from "./components/DailyLaunches";
@@ -75,6 +83,7 @@ const NAV_ITEMS = [
   { name: "Programação PCP", icon: Zap },
   { name: "Produção", icon: Disc },
   { name: "Relatórios", icon: ClipboardList },
+  { name: "Custos & Insumos", icon: Coins },
   { name: "Cadastros", icon: Settings },
 ];
 
@@ -91,7 +100,9 @@ export default function App() {
   const [notice, setNotice] = useState("");
   const [machineFilter, setMachineFilter] = useState("Todas");
   const [newOrderOpen, setNewOrderOpen] = useState(false);
+  const [migrationOpen, setMigrationOpen] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [technicalClosureOrder, setTechnicalClosureOrder] = useState<Order | null>(null);
   const [pcpView, setPcpView] = useState<"Aguardando" | "Programadas">("Programadas");
   const [pcpMachine, setPcpMachine] = useState("Todas");
   const [pcpCategory, setPcpCategory] = useState<"Todas" | ProductCategory>("Todas");
@@ -147,6 +158,9 @@ export default function App() {
     const records = rows
       .filter(r => r.key.startsWith("record:"))
       .map(r => ({ ...json<Production>(r.value, {}), _key: r.key, _updatedAt: r.updated_at }));
+    const paletes = rows
+      .filter(r => r.key.startsWith("palete:"))
+      .map(r => ({ ...json<PaleteRomaneio>(r.value, {} as PaleteRomaneio), _key: r.key, _updatedAt: r.updated_at }));
     const machineRow = rows.find(r => r.key === "config:maquinas");
     const machines = machineRow ? json<Machine[]>(machineRow.value, []) : [];
     const config = (key: string) => {
@@ -181,7 +195,7 @@ export default function App() {
       current[sector] = (current[sector] || 0) + number(record.qtdProduzido);
       totals.set(canonicalId, current);
     });
-    return { orders, records, totals, machines, operators, clients, products, materials, registries };
+    return { orders, records, totals, machines, operators, clients, products, materials, registries, paletes };
   }, [rows]);
 
   useEffect(() => {
@@ -335,6 +349,7 @@ export default function App() {
         "Programação PCP",
         "Produção",
         "Relatórios",
+        "Custos & Insumos",
         "Cadastros",
       ].includes(item)
     )
@@ -557,7 +572,7 @@ export default function App() {
   }
 
   async function registerProduction(order: Order, input: Production) {
-    const machine = data.machines.find(item => item.id === order.maquinaId);
+    const machine = data.machines.find(item => item.id === (input.maquinaId || order.maquinaId));
     if (!machine) return;
     setSaving(true);
     setNotice("");
@@ -786,6 +801,8 @@ export default function App() {
                   ? "Filas de produção"
                   : active === "Relatórios"
                   ? "Histórico de produção"
+                  : active === "Custos & Insumos"
+                  ? "Custos por setor & matérias-primas"
                   : active === "Cadastros"
                   ? "Cadastros operacionais"
                   : "Pedidos e ordens de produção"}
@@ -807,6 +824,8 @@ export default function App() {
                   ? "Selecione uma OP programada para registrar um novo apontamento."
                   : active === "Relatórios"
                   ? "Consulte e corrija apontamentos reais com filtros operacionais."
+                  : active === "Custos & Insumos"
+                  ? "Gestão de matérias-primas, estoque de resinas/tintas, taxas de hora-máquina e fichas técnicas."
                   : active === "Cadastros"
                   ? "Mantenha as listas usadas nos formulários de pedidos e apontamentos."
                   : "Acompanhe o avanço real de cada pedido, do mais antigo ao mais novo."}
@@ -832,14 +851,27 @@ export default function App() {
           ) : active === "Lançamentos" ? (
             <DailyLaunches
               records={launchRecords}
+              allRecords={data.records}
               orders={data.orders}
               machines={data.machines}
+              operators={data.operators}
+              paletes={data.paletes || []}
+              onSavePalete={async (palete) => {
+                await savePalete(palete);
+                await refresh();
+              }}
+              onDeletePalete={async (paleteId) => {
+                await deletePalete(paleteId);
+                await refresh();
+              }}
               selectedDate={launchDate}
               selectedMachine={launchMachine}
               onDate={setLaunchDate}
               onMachine={setLaunchMachine}
               onOpen={order => setSelected(order)}
               onEditRecord={setSelectedRecord}
+              onRefresh={refresh}
+              onRegisterProduction={registerProduction}
             />
           ) : active === "Relatório diário" ? (
             <DailySectorReport
@@ -868,7 +900,7 @@ export default function App() {
               onOrder={setMonthlyOrder}
             />
           ) : (
-            !["Relatórios", "Cadastros", "Central de prazos"].includes(active) && (
+            !["Relatórios", "Cadastros", "Central de prazos", "Custos & Insumos"].includes(active) && (
               <section className="metrics">
                 <Metric label="Pedidos ativos" value={metrics.active} detail="Exclui OPs finalizadas" tone="blue" />
                 <Metric label="Em produção" value={metrics.producing} detail="Alguma etapa em andamento" tone="green" />
@@ -878,7 +910,9 @@ export default function App() {
             )
           )}
 
-          {active === "Cadastros" ? (
+          {active === "Custos & Insumos" ? (
+            <CostAndSuppliesView />
+          ) : active === "Cadastros" ? (
             <RegistryPanel
               kind={registryKind}
               onKind={setRegistryKind}
@@ -890,7 +924,7 @@ export default function App() {
               onSave={updateRegistry}
             />
           ) : (
-            !["Visão geral", "Central de prazos", "Lançamentos", "Relatório diário", "Painel mensal"].includes(active) && (
+            !["Visão geral", "Central de prazos", "Lançamentos", "Relatório diário", "Painel mensal", "Custos & Insumos"].includes(active) && (
               <section className="panel">
                 <div className="panel-head">
                   {active === "Pedidos / OP" && (
@@ -1237,6 +1271,7 @@ export default function App() {
                 onEdit={() => setEditing(true)}
                 onFinish={closure => changeOrderState(selected, "finish", closure)}
                 onReopen={closure => changeOrderState(selected, "reopen", closure)}
+                onOpenTechnicalClosure={order => setTechnicalClosureOrder(order)}
               />
             )}
           </article>
@@ -1283,6 +1318,33 @@ export default function App() {
             />
           </article>
         </div>
+      )}
+
+      <DatabaseMigrationModal
+        isOpen={migrationOpen}
+        onClose={() => setMigrationOpen(false)}
+      />
+
+      {technicalClosureOrder && (
+        <TechnicalClosureModal
+          order={technicalClosureOrder}
+          records={data.records}
+          machines={data.machines}
+          updatedAtSource={rows.find(row => row.key === `pedido:${technicalClosureOrder.id}`)?.updated_at}
+          onClose={() => setTechnicalClosureOrder(null)}
+          onCompleted={updatedOrder => {
+            refresh();
+            setSelected(updatedOrder);
+            setTechnicalClosureOrder(updatedOrder);
+          }}
+          onShowNotification={(msg, type) => {
+            if (type === "success") {
+              setNotice(msg);
+            } else {
+              setError(msg);
+            }
+          }}
+        />
       )}
     </main>
   );

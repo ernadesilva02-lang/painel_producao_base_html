@@ -429,6 +429,7 @@ export function OrderManagement({
   onEdit,
   onFinish,
   onReopen,
+  onOpenTechnicalClosure,
 }: {
   order: Order;
   records: Production[];
@@ -437,6 +438,7 @@ export function OrderManagement({
   onEdit: () => void;
   onFinish: (closure: { responsavel: string; observacao?: string }) => void;
   onReopen: (closure: { responsavel: string; observacao?: string }) => void;
+  onOpenTechnicalClosure?: (order: Order) => void;
 }) {
   const finished = order.statusProducao?.toUpperCase() === "FINALIZADO";
   const [closing, setClosing] = useState(false);
@@ -613,14 +615,22 @@ export function OrderManagement({
         </button>
       )}
       {finished ? (
-        <>
+        <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+          <button
+            type="button"
+            className="finish-action"
+            style={{ background: "#4338ca", borderColor: "#3730a3", display: "flex", alignItems: "center", justifyContent: "center", gap: "6px" }}
+            onClick={() => onOpenTechnicalClosure?.(order)}
+          >
+            <span>🛡️ Ver Laudo Técnico & Certificado de Expedição</span>
+          </button>
           <button className="secondary-action" onClick={printClosure}>
-            Imprimir fechamento / Salvar PDF
+            Imprimir fechamento simples / PDF
           </button>
           <button className="reopen-action" disabled={saving} onClick={confirmReopen}>
             {saving ? "Salvando..." : "Reabrir OP"}
           </button>
-        </>
+        </div>
       ) : closing ? (
         <div className="closure-form">
           <label className="field">
@@ -657,9 +667,29 @@ export function OrderManagement({
           </div>
         </div>
       ) : (
-        <button className="finish-action" disabled={saving || !balance.steps.length} onClick={() => setClosing(true)}>
-          {balance.steps.length ? "✓ Conferir e fechar OP" : "Sem produção para fechar"}
-        </button>
+        <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+          <button
+            type="button"
+            className="finish-action"
+            style={{ background: "#4338ca", borderColor: "#3730a3" }}
+            disabled={saving || !balance.steps.length}
+            onClick={() => onOpenTechnicalClosure?.(order)}
+          >
+            {balance.steps.length
+              ? "🛡️ Fechamento Técnico & Baixa Automática de Estoque"
+              : "Sem produção para fechar"}
+          </button>
+          {balance.steps.length > 0 && (
+            <button
+              type="button"
+              className="secondary-action"
+              disabled={saving}
+              onClick={() => setClosing(true)}
+            >
+              ✓ Fechamento Rápido (Sem Baixa)
+            </button>
+          )}
+        </div>
       )}
       <p className="save-warning">
         {finished
