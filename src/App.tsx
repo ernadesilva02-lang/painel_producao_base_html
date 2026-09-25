@@ -167,10 +167,33 @@ export default function App() {
       const row = rows.find(item => item.key === key);
       return row ? json<string[]>(row.value, []) : [];
     };
-    const operators = config("config:operadores");
-    const clients = config("config:clientes");
-    const products = config("config:produtos");
-    const materials = config("config:materiais");
+    const operatorsConfig = config("config:operadores");
+    const clientsConfig = config("config:clientes");
+    const productsConfig = config("config:produtos");
+    const materialsConfig = config("config:materiais");
+
+    // Unifica cadastros com pedidos e apontamentos para garantir que todos os clientes,
+    // produtos e materiais existentes estejam sempre visíveis e disponíveis para busca
+    const dedupeAndSort = (base: string[], extra: (string | undefined | null)[]) => {
+      const map = new Map<string, string>();
+      base.forEach(item => {
+        const trimmed = (item || "").trim();
+        if (trimmed) map.set(trimmed.toLocaleLowerCase("pt-BR"), trimmed);
+      });
+      extra.forEach(item => {
+        const trimmed = (item || "").trim();
+        if (trimmed && !map.has(trimmed.toLocaleLowerCase("pt-BR"))) {
+          map.set(trimmed.toLocaleLowerCase("pt-BR"), trimmed);
+        }
+      });
+      return Array.from(map.values()).sort((a, b) => a.localeCompare(b, "pt-BR"));
+    };
+
+    const clients = dedupeAndSort(clientsConfig, orders.map(o => o.cliente));
+    const products = dedupeAndSort(productsConfig, orders.map(o => o.descricaoItem));
+    const materials = dedupeAndSort(materialsConfig, orders.map(o => o.material));
+    const operators = dedupeAndSort(operatorsConfig, records.map(r => r.operador));
+
     const registries: RegistryData = {
       operadores: operators,
       clientes: clients,
@@ -588,11 +611,41 @@ export default function App() {
     }
   }
 
+  async function syncOrderRegistries(cliente?: string, produto?: string, material?: string) {
+    try {
+      const tasks: Promise<void>[] = [];
+      const cleanCliente = cliente?.trim();
+      if (cleanCliente && !data.clients.some(c => c.toLocaleLowerCase("pt-BR") === cleanCliente.toLocaleLowerCase("pt-BR"))) {
+        const nextClients = [...data.clients, cleanCliente].sort((a, b) => a.localeCompare(b, "pt-BR"));
+        const source = rows.find(r => r.key === "config:clientes");
+        tasks.push(saveRegistry("clientes", nextClients, source?.updated_at));
+      }
+      const cleanProd = produto?.trim();
+      if (cleanProd && !data.products.some(p => p.toLocaleLowerCase("pt-BR") === cleanProd.toLocaleLowerCase("pt-BR"))) {
+        const nextProds = [...data.products, cleanProd].sort((a, b) => a.localeCompare(b, "pt-BR"));
+        const source = rows.find(r => r.key === "config:produtos");
+        tasks.push(saveRegistry("produtos", nextProds, source?.updated_at));
+      }
+      const cleanMat = material?.trim();
+      if (cleanMat && !data.materials.some(m => m.toLocaleLowerCase("pt-BR") === cleanMat.toLocaleLowerCase("pt-BR"))) {
+        const nextMats = [...data.materials, cleanMat].sort((a, b) => a.localeCompare(b, "pt-BR"));
+        const source = rows.find(r => r.key === "config:materiais");
+        tasks.push(saveRegistry("materiais", nextMats, source?.updated_at));
+      }
+      if (tasks.length > 0) {
+        await Promise.all(tasks);
+      }
+    } catch (err) {
+      console.warn("Falha ao sincronizar cadastros:", err);
+    }
+  }
+
   async function registerOrder(input: Omit<Order, "id">) {
     setSaving(true);
     setNotice("");
     try {
       const created = await createOrder(input);
+      await syncOrderRegistries(input.cliente, input.descricaoItem, input.material);
       setNewOrderOpen(false);
       setNotice(`Pedido ${created.numeroPedido || created.id} cadastrado com sucesso.`);
       await refresh();
@@ -610,6 +663,7 @@ export default function App() {
     setNotice("");
     try {
       await saveOrder(order, source.updated_at);
+      await syncOrderRegistries(order.cliente, order.descricaoItem, order.material);
       setSelected(order);
       setEditing(false);
       setNotice(`Pedido ${order.numeroPedido || order.id} atualizado com sucesso.`);
@@ -696,7 +750,7 @@ export default function App() {
 
   async function updateRegistry(kind: RegistryKind, previousValue: string | null, nextValue: string) {
     const source = rows.find(row => row.key === `config:${kind}`);
-    const current = source ? json<string[]>(source.value, []) : (data.registries[kind] || []);
+    const current = data.registries[kind] || (source ? json<string[]>(source.value, []) : []);
     const clean = nextValue.trim();
     if (!clean) return;
     if (current.some(item => item.toLocaleLowerCase("pt-BR") === clean.toLocaleLowerCase("pt-BR") && item !== previousValue)) {
