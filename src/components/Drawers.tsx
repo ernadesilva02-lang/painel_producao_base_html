@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useMemo } from "react";
 import { History, Calendar, Clock, User, Pencil, Info, ChevronDown, ChevronUp } from "lucide-react";
 import { Order, Machine, Production, SECTORS, PRODUCT_CATEGORIES } from "../types/forpack";
 import { date, kg, number, inferredCategory, categoryLabel, orderBalance } from "../utils/formatters";
@@ -721,6 +721,18 @@ export function EditOrderForm({
   const update = (field: keyof Order, value: string) => setInput(current => ({ ...current, [field]: value }));
   const valid = Boolean(input.data && input.cliente.trim() && input.descricaoItem.trim() && number(input.quantidade) > 0);
 
+  const matchingClients = useMemo(() => {
+    const q = (input.cliente || "").trim().toLowerCase();
+    if (!q) return [];
+    return clients.filter(c => c.toLowerCase().includes(q) && c.toLowerCase() !== q).slice(0, 5);
+  }, [input.cliente, clients]);
+
+  const matchingProducts = useMemo(() => {
+    const q = (input.descricaoItem || "").trim().toLowerCase();
+    if (!q) return [];
+    return products.filter(p => p.toLowerCase().includes(q) && p.toLowerCase() !== q).slice(0, 5);
+  }, [input.descricaoItem, products]);
+
   return (
     <form
       className="new-order-form edit-order-form"
@@ -754,6 +766,21 @@ export function EditOrderForm({
             <option key={client} value={client} />
           ))}
         </datalist>
+        {matchingClients.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5 mt-1.5 p-2 bg-slate-50 border border-slate-200 rounded-md text-xs">
+            <span className="text-slate-500 font-medium">Sugestões:</span>
+            {matchingClients.map(clientName => (
+              <button
+                key={clientName}
+                type="button"
+                className="px-2 py-0.5 bg-blue-50 hover:bg-blue-100 text-blue-700 font-medium rounded border border-blue-200 transition-colors text-left"
+                onClick={() => update("cliente", clientName)}
+              >
+                {clientName}
+              </button>
+            ))}
+          </div>
+        )}
       </label>
       <label className="field">
         <span>Produto / descrição *</span>
@@ -763,6 +790,21 @@ export function EditOrderForm({
             <option key={product} value={product} />
           ))}
         </datalist>
+        {matchingProducts.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5 mt-1.5 p-2 bg-slate-50 border border-slate-200 rounded-md text-xs">
+            <span className="text-slate-500 font-medium">Sugestões:</span>
+            {matchingProducts.map(prodName => (
+              <button
+                key={prodName}
+                type="button"
+                className="px-2 py-0.5 bg-blue-50 hover:bg-blue-100 text-blue-700 font-medium rounded border border-blue-200 transition-colors text-left"
+                onClick={() => update("descricaoItem", prodName)}
+              >
+                {prodName}
+              </button>
+            ))}
+          </div>
+        )}
       </label>
       <label className="field">
         <span>Categoria do produto *</span>
@@ -863,6 +905,28 @@ export function NewOrderForm({
   const update = (field: keyof Omit<Order, "id">, value: string) => setInput(current => ({ ...current, [field]: value }));
   const valid = Boolean(input.data && input.cliente.trim() && input.descricaoItem.trim() && number(input.quantidade) > 0);
 
+  const matchingClients = useMemo(() => {
+    const q = input.cliente.trim().toLowerCase();
+    if (!q) return [];
+    return clients.filter(c => c.toLowerCase().includes(q) && c.toLowerCase() !== q).slice(0, 5);
+  }, [input.cliente, clients]);
+
+  const matchingProducts = useMemo(() => {
+    const q = input.descricaoItem.trim().toLowerCase();
+    if (!q) return [];
+    return products.filter(p => p.toLowerCase().includes(q) && p.toLowerCase() !== q).slice(0, 5);
+  }, [input.descricaoItem, products]);
+
+  const isKnownClient = useMemo(() => {
+    const q = input.cliente.trim().toLowerCase();
+    return q && clients.some(c => c.toLowerCase() === q);
+  }, [input.cliente, clients]);
+
+  const isKnownProduct = useMemo(() => {
+    const q = input.descricaoItem.trim().toLowerCase();
+    return q && products.some(p => p.toLowerCase() === q);
+  }, [input.descricaoItem, products]);
+
   return (
     <form
       className="new-order-form"
@@ -896,7 +960,30 @@ export function NewOrderForm({
             <option key={client} value={client} />
           ))}
         </datalist>
-        <small className="field-help">{clients.length} clientes cadastrados disponíveis</small>
+        {matchingClients.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5 mt-1.5 p-2 bg-slate-50 border border-slate-200 rounded-md text-xs">
+            <span className="text-slate-500 font-medium">Sugestões:</span>
+            {matchingClients.map(clientName => (
+              <button
+                key={clientName}
+                type="button"
+                className="px-2 py-0.5 bg-blue-50 hover:bg-blue-100 text-blue-700 font-medium rounded border border-blue-200 transition-colors text-left"
+                onClick={() => update("cliente", clientName)}
+              >
+                {clientName}
+              </button>
+            ))}
+          </div>
+        )}
+        <div className="flex items-center justify-between text-xs mt-1">
+          <small className="field-help">{clients.length} clientes cadastrados disponíveis</small>
+          {isKnownClient && (
+            <span className="text-emerald-700 font-medium">✓ Cliente cadastrado</span>
+          )}
+          {!isKnownClient && input.cliente.trim().length >= 3 && (
+            <span className="text-amber-700 font-medium">+ Novo cliente (será salvo automaticamente)</span>
+          )}
+        </div>
       </label>
       <label className="field">
         <span>Produto / descrição do item *</span>
@@ -913,7 +1000,30 @@ export function NewOrderForm({
             <option key={product} value={product} />
           ))}
         </datalist>
-        <small className="field-help">{products.length} produtos cadastrados disponíveis</small>
+        {matchingProducts.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5 mt-1.5 p-2 bg-slate-50 border border-slate-200 rounded-md text-xs">
+            <span className="text-slate-500 font-medium">Sugestões:</span>
+            {matchingProducts.map(prodName => (
+              <button
+                key={prodName}
+                type="button"
+                className="px-2 py-0.5 bg-blue-50 hover:bg-blue-100 text-blue-700 font-medium rounded border border-blue-200 transition-colors text-left"
+                onClick={() => update("descricaoItem", prodName)}
+              >
+                {prodName}
+              </button>
+            ))}
+          </div>
+        )}
+        <div className="flex items-center justify-between text-xs mt-1">
+          <small className="field-help">{products.length} produtos cadastrados disponíveis</small>
+          {isKnownProduct && (
+            <span className="text-emerald-700 font-medium">✓ Produto cadastrado</span>
+          )}
+          {!isKnownProduct && input.descricaoItem.trim().length >= 3 && (
+            <span className="text-amber-700 font-medium">+ Novo produto (será salvo automaticamente)</span>
+          )}
+        </div>
       </label>
       <label className="field">
         <span>Categoria do produto *</span>
