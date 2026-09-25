@@ -12,6 +12,11 @@ import {
   FileCode,
   Eye,
   AlertCircle,
+  HelpCircle,
+  Wrench,
+  CheckCircle2,
+  Info,
+  ArrowRight,
 } from "lucide-react";
 import { Order, ItemPaleteRomaneio, PaleteRomaneio } from "../types/forpack";
 
@@ -170,21 +175,16 @@ export function printEtiquetasZebra(
   const pageWidthMm = is2Col ? singleWidthMm * 2 + 2 : singleWidthMm;
   const pageHeightMm = singleHeightMm;
 
-  // Orientação e rotação CSS para neutralizar giros indesejados de drivers térmicos
-  let pageRotationCss = "";
-  let pageSizeCss = `${pageWidthMm}mm ${pageHeightMm}mm`;
+  // Configuração precisa de tamanho de página e dimensões do body para evitar giros indesejados no Chrome
+  const isRotated = config.orientacao === "rotacionada_90" || config.orientacao === "rotacionada_270";
+  const pageSizeCss = isRotated
+    ? `${pageHeightMm}mm ${pageWidthMm}mm portrait`
+    : config.orientacao === "vertical"
+    ? `${pageWidthMm}mm ${pageHeightMm}mm portrait`
+    : `${pageWidthMm}mm ${pageHeightMm}mm landscape`;
 
-  if (config.orientacao === "rotacionada_90") {
-    pageRotationCss = "transform: rotate(90deg); transform-origin: top left; margin-left: 24mm;";
-    pageSizeCss = `${pageHeightMm}mm ${pageWidthMm}mm`;
-  } else if (config.orientacao === "rotacionada_270") {
-    pageRotationCss = "transform: rotate(-90deg); transform-origin: top left; margin-top: 88mm;";
-    pageSizeCss = `${pageHeightMm}mm ${pageWidthMm}mm`;
-  } else if (config.orientacao === "invertida_180") {
-    pageRotationCss = "transform: rotate(180deg); transform-origin: center center;";
-  } else if (config.orientacao === "vertical") {
-    pageSizeCss = `${pageHeightMm}mm ${pageWidthMm}mm`;
-  }
+  const bodyWidthMm = isRotated ? pageHeightMm : pageWidthMm;
+  const bodyHeightMm = isRotated ? pageWidthMm : pageHeightMm;
 
   // Lista base de itens
   const baseItens: EtiquetaBobinaItem[] =
@@ -245,6 +245,36 @@ export function printEtiquetasZebra(
     </div>`;
   };
 
+  // Helper para encapsular o conteúdo de acordo com a rotação
+  const wrapPageContent = (innerHtml: string) => {
+    if (config.orientacao === "rotacionada_270") {
+      return `
+      <div class="page-wrapper-rot270" style="width: ${pageHeightMm}mm; height: ${pageWidthMm}mm; position: relative; overflow: hidden; page-break-after: always; break-after: page;">
+        <div style="width: ${pageWidthMm}mm; height: ${pageHeightMm}mm; position: absolute; top: 0; left: 0; transform-origin: 0 0; transform: rotate(-90deg) translateX(-${pageWidthMm}mm); display: flex; flex-direction: row; align-items: center; justify-content: space-between;">
+          ${innerHtml}
+        </div>
+      </div>`;
+    }
+    if (config.orientacao === "rotacionada_90") {
+      return `
+      <div class="page-wrapper-rot90" style="width: ${pageHeightMm}mm; height: ${pageWidthMm}mm; position: relative; overflow: hidden; page-break-after: always; break-after: page;">
+        <div style="width: ${pageWidthMm}mm; height: ${pageHeightMm}mm; position: absolute; top: 0; left: 0; transform-origin: 0 0; transform: rotate(90deg) translateY(-${pageHeightMm}mm); display: flex; flex-direction: row; align-items: center; justify-content: space-between;">
+          ${innerHtml}
+        </div>
+      </div>`;
+    }
+    if (config.orientacao === "invertida_180") {
+      return `
+      <div class="page-wrapper-inv180" style="width: ${pageWidthMm}mm; height: ${pageHeightMm}mm; overflow: hidden; page-break-after: always; break-after: page; transform: rotate(180deg); transform-origin: center center; display: flex; flex-direction: row; align-items: center; justify-content: space-between;">
+        ${innerHtml}
+      </div>`;
+    }
+    return `
+    <div class="etiqueta-page-row" style="width: ${pageWidthMm}mm; height: ${pageHeightMm}mm; display: flex; flex-direction: row; align-items: center; justify-content: space-between; page-break-after: always; break-after: page; overflow: hidden;">
+      ${innerHtml}
+    </div>`;
+  };
+
   // Montagem do corpo da impressão: agrupamento de 2 em 2 colunas
   let bodyContent = "";
   if (is2Col) {
@@ -263,22 +293,17 @@ export function printEtiquetasZebra(
 
     bodyContent = pairs
       .map(
-        ([item1, item2]) => `
-      <div class="etiqueta-page-row" style="width: ${pageWidthMm}mm; height: ${pageHeightMm}mm; ${pageRotationCss}">
-        ${renderCardHtml(item1)}
-        <div class="col-gap" style="width: 2mm;"></div>
-        ${renderCardHtml(item2)}
-      </div>`
+        ([item1, item2]) =>
+          wrapPageContent(`
+            ${renderCardHtml(item1)}
+            <div class="col-gap" style="width: 2mm;"></div>
+            ${renderCardHtml(item2)}
+          `)
       )
       .join("");
   } else {
     bodyContent = baseItens
-      .map(
-        (item) => `
-      <div class="etiqueta-page-single" style="width: ${pageWidthMm}mm; height: ${pageHeightMm}mm; ${pageRotationCss}">
-        ${renderCardHtml(item)}
-      </div>`
-      )
+      .map((item) => wrapPageContent(renderCardHtml(item)))
       .join("");
   }
 
@@ -290,18 +315,19 @@ export function printEtiquetasZebra(
   <style>
     @page {
       size: ${pageSizeCss};
-      margin: 0;
+      margin: 0 !important;
     }
     @media print {
       @page {
         size: ${pageSizeCss};
-        margin: 0;
+        margin: 0 !important;
       }
       html, body {
         margin: 0 !important;
         padding: 0 !important;
-        width: ${pageWidthMm}mm !important;
-        height: ${pageHeightMm}mm !important;
+        width: ${bodyWidthMm}mm !important;
+        height: ${bodyHeightMm}mm !important;
+        overflow: hidden !important;
       }
     }
     * {
@@ -600,7 +626,7 @@ export function EtiquetaZebraModal({
   );
 
   // Tab mode
-  const [tab, setTab] = useState<"preview" | "lote" | "zpl">("preview");
+  const [tab, setTab] = useState<"preview" | "lote" | "guia" | "zpl">("preview");
 
   // Selection mode: single bobina vs all bobinas from pallet vs blank batch
   const [printScope, setPrintScope] = useState<"single" | "all" | "blank">(
@@ -667,6 +693,18 @@ export function EtiquetaZebraModal({
     printEtiquetasZebra(targetItens, config);
   };
 
+  const handlePrintTest = () => {
+    // Imprime apenas 1 avanço (1 par em 2 colunas ou 1 unidade) para testar alinhamento
+    const testItem: EtiquetaBobinaItem = {
+      posicao: 1,
+      pesoBruto: previewBobina.pesoBruto > 0 ? previewBobina.pesoBruto : 28.5,
+      tara: 1.6,
+      pesoLiquido: previewBobina.pesoLiquido > 0 ? previewBobina.pesoLiquido : 26.9,
+      codigoBobina: "TESTE",
+    };
+    printEtiquetasZebra([testItem], config);
+  };
+
   const handleCopyZpl = () => {
     navigator.clipboard.writeText(zplString);
     setCopiedZpl(true);
@@ -719,11 +757,11 @@ export function EtiquetaZebraModal({
         </div>
 
         {/* NAVEGAÇÃO DE ABAS */}
-        <div className="flex border-b border-slate-200 bg-slate-50 px-5 pt-2 gap-2 text-xs font-semibold shrink-0">
+        <div className="flex border-b border-slate-200 bg-slate-50 px-5 pt-2 gap-2 text-xs font-semibold shrink-0 overflow-x-auto">
           <button
             type="button"
             onClick={() => setTab("preview")}
-            className={`pb-2.5 px-3 border-b-2 flex items-center gap-1.5 transition cursor-pointer ${
+            className={`pb-2.5 px-3 border-b-2 flex items-center gap-1.5 transition cursor-pointer shrink-0 ${
               tab === "preview"
                 ? "border-blue-600 text-blue-600"
                 : "border-transparent text-slate-500 hover:text-slate-800"
@@ -735,7 +773,7 @@ export function EtiquetaZebraModal({
           <button
             type="button"
             onClick={() => setTab("lote")}
-            className={`pb-2.5 px-3 border-b-2 flex items-center gap-1.5 transition cursor-pointer ${
+            className={`pb-2.5 px-3 border-b-2 flex items-center gap-1.5 transition cursor-pointer shrink-0 ${
               tab === "lote"
                 ? "border-blue-600 text-blue-600"
                 : "border-transparent text-slate-500 hover:text-slate-800"
@@ -746,8 +784,20 @@ export function EtiquetaZebraModal({
           </button>
           <button
             type="button"
+            onClick={() => setTab("guia")}
+            className={`pb-2.5 px-3 border-b-2 flex items-center gap-1.5 transition cursor-pointer shrink-0 ${
+              tab === "guia"
+                ? "border-blue-600 text-blue-600"
+                : "border-transparent text-slate-500 hover:text-slate-800"
+            }`}
+          >
+            <Wrench className="w-3.5 h-3.5 text-amber-500" />
+            <span className="font-bold">Guia da Impressora & Driver</span>
+          </button>
+          <button
+            type="button"
             onClick={() => setTab("zpl")}
-            className={`pb-2.5 px-3 border-b-2 flex items-center gap-1.5 transition cursor-pointer ${
+            className={`pb-2.5 px-3 border-b-2 flex items-center gap-1.5 transition cursor-pointer shrink-0 ${
               tab === "zpl"
                 ? "border-blue-600 text-blue-600"
                 : "border-transparent text-slate-500 hover:text-slate-800"
@@ -901,44 +951,109 @@ export function EtiquetaZebraModal({
                   </div>
                 </div>
 
-                {/* BOTÃO E AVISO DE CORREÇÃO RÁPIDA DE ORIENTAÇÃO (RESOLVE A FOTO 1) */}
-                <div className="mt-3 p-3 bg-amber-50 border border-amber-300 rounded-xl text-xs text-amber-900 w-full space-y-2">
-                  <div className="flex items-start gap-2">
-                    <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-                    <div>
-                      <strong className="block font-bold">Ajuste de Orientação para Zebra:</strong>
-                      <span>
-                        Se na sua impressora sair virada de lado (cortando na vertical como na Foto 1), clique no botão abaixo para inverter os 90° e alinhar na horizontal:
-                      </span>
+                {/* PAINEL DE ALINHAMENTO E CORREÇÃO DE GIRO (SOLUÇÃO DA FOTO 1) */}
+                <div className="mt-3 p-3 bg-amber-50/90 border border-amber-300 rounded-xl text-xs text-amber-950 w-full space-y-2.5 shadow-xs">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-start gap-2">
+                      <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                      <div>
+                        <strong className="block font-bold text-amber-950">
+                          Ajuste de Alinhamento da Zebra:
+                        </strong>
+                        <span className="text-[11px] text-amber-900 leading-tight block">
+                          Se o texto sair de lado (cortando as etiquetas na vertical como na Foto 1), selecione <strong>Girar -90°</strong> ou confira o guia do driver.
+                        </span>
+                      </div>
                     </div>
-                  </div>
-                  <div className="flex items-center gap-2 pt-1">
                     <button
                       type="button"
-                      onClick={() =>
-                        setConfig({
-                          ...config,
-                          orientacao: config.orientacao === "rotacionada_270" ? "horizontal" : "rotacionada_270",
-                        })
-                      }
-                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-xs ${
-                        config.orientacao === "rotacionada_270"
-                          ? "bg-amber-600 text-white hover:bg-amber-700"
-                          : "bg-white border border-amber-300 text-amber-900 hover:bg-amber-100"
+                      onClick={() => setTab("guia")}
+                      className="text-[10px] font-bold text-blue-700 hover:text-blue-900 bg-white px-2 py-1 rounded border border-blue-300 shrink-0 flex items-center gap-1 shadow-2xs hover:bg-blue-50 cursor-pointer"
+                    >
+                      <HelpCircle className="w-3 h-3 text-blue-600" />
+                      <span>Ver Guia da Zebra</span>
+                    </button>
+                  </div>
+
+                  {/* 4 MODOS DE GIRO RÁPIDO */}
+                  <div className="grid grid-cols-2 gap-1.5 pt-0.5">
+                    <button
+                      type="button"
+                      onClick={() => setConfig({ ...config, orientacao: "horizontal" })}
+                      className={`p-1.5 rounded-lg text-left transition cursor-pointer border ${
+                        config.orientacao === "horizontal"
+                          ? "bg-blue-600 text-white border-blue-700 font-bold shadow-2xs"
+                          : "bg-white border-slate-200 text-slate-700 hover:bg-slate-50"
                       }`}
                     >
-                      <RotateCcw className="w-3.5 h-3.5" />
-                      <span>{config.orientacao === "rotacionada_270" ? "✓ Giro -90° Ativo (Correção aplicada)" : "Girar -90° (Corrigir impressão de lado)"}</span>
+                      <div className="text-[11px] leading-tight">1. Horizontal (0°)</div>
+                      <div className={`text-[9px] ${config.orientacao === "horizontal" ? "text-blue-100" : "text-slate-400"}`}>
+                        Padrão Foto 2 (Paisagem)
+                      </div>
                     </button>
-                    {config.orientacao !== "horizontal" && (
-                      <button
-                        type="button"
-                        onClick={() => setConfig({ ...config, orientacao: "horizontal" })}
-                        className="text-[11px] text-slate-600 hover:underline cursor-pointer"
-                      >
-                        Resetar (0°)
-                      </button>
-                    )}
+
+                    <button
+                      type="button"
+                      onClick={() => setConfig({ ...config, orientacao: "rotacionada_270" })}
+                      className={`p-1.5 rounded-lg text-left transition cursor-pointer border ${
+                        config.orientacao === "rotacionada_270"
+                          ? "bg-amber-600 text-white border-amber-700 font-bold shadow-2xs ring-1 ring-amber-400"
+                          : "bg-white border-amber-300 text-amber-950 hover:bg-amber-100/50"
+                      }`}
+                    >
+                      <div className="text-[11px] leading-tight font-bold flex items-center gap-1">
+                        <RotateCcw className="w-3 h-3" />
+                        <span>2. Girar -90° (Compensar)</span>
+                      </div>
+                      <div className={`text-[9px] ${config.orientacao === "rotacionada_270" ? "text-amber-100" : "text-amber-700"}`}>
+                        Corrige se sair de lado (Foto 1)
+                      </div>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setConfig({ ...config, orientacao: "vertical" })}
+                      className={`p-1.5 rounded-lg text-left transition cursor-pointer border ${
+                        config.orientacao === "vertical"
+                          ? "bg-blue-600 text-white border-blue-700 font-bold shadow-2xs"
+                          : "bg-white border-slate-200 text-slate-700 hover:bg-slate-50"
+                      }`}
+                    >
+                      <div className="text-[11px] leading-tight">3. Retrato (Vertical)</div>
+                      <div className={`text-[9px] ${config.orientacao === "vertical" ? "text-blue-100" : "text-slate-400"}`}>
+                        Para driver em Retrato
+                      </div>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setConfig({ ...config, orientacao: "invertida_180" })}
+                      className={`p-1.5 rounded-lg text-left transition cursor-pointer border ${
+                        config.orientacao === "invertida_180"
+                          ? "bg-blue-600 text-white border-blue-700 font-bold shadow-2xs"
+                          : "bg-white border-slate-200 text-slate-700 hover:bg-slate-50"
+                      }`}
+                    >
+                      <div className="text-[11px] leading-tight">4. Inverter 180°</div>
+                      <div className={`text-[9px] ${config.orientacao === "invertida_180" ? "text-blue-100" : "text-slate-400"}`}>
+                        De ponta-cabeça
+                      </div>
+                    </button>
+                  </div>
+
+                  {/* BOTÃO DE TESTE RÁPIDO */}
+                  <div className="pt-1 flex items-center justify-between border-t border-amber-200/80">
+                    <span className="text-[10px] text-amber-900">
+                      Modo selecionado: <strong>{config.orientacao === "rotacionada_270" ? "Giro -90° (Compensação de Driver Ativa)" : config.orientacao === "horizontal" ? "Horizontal 0° (Normal)" : config.orientacao === "vertical" ? "Retrato" : "Invertido 180°"}</strong>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handlePrintTest}
+                      className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-md text-[11px] flex items-center gap-1.5 shadow-2xs transition cursor-pointer active:scale-95"
+                    >
+                      <Printer className="w-3 h-3" />
+                      <span>Testar 1 Par Agora</span>
+                    </button>
                   </div>
                 </div>
               </div>
@@ -1279,6 +1394,119 @@ export function EtiquetaZebraModal({
             </div>
           )}
 
+          {tab === "guia" && (
+            <div className="space-y-4 text-xs">
+              {/* DIAGNÓSTICO DO QUE ESTÁ ACONTECENDO */}
+              <div className="p-3.5 bg-amber-50 border border-amber-300 rounded-xl space-y-2 text-amber-950">
+                <div className="flex items-center gap-2">
+                  <AlertCircle className="w-5 h-5 text-amber-600 shrink-0" />
+                  <h4 className="font-bold text-sm text-amber-950">
+                    Por que a etiqueta sai de lado ou cortando? (Diagnóstico da Foto 1)
+                  </h4>
+                </div>
+                <p className="text-[12px] leading-relaxed text-amber-900">
+                  O rolo físico da fábrica Forpack possui <strong>2 etiquetas lado a lado (88 mm de largura total)</strong> por <strong>24 mm de altura (avanço)</strong>. Como a largura (88mm) é maior que a altura (24mm), o Google Chrome e o Windows interpretam a página como <em>"Paisagem"</em>. Se o driver da Zebra esperar <em>"Retrato"</em>, ele rotaciona o conteúdo em 90°, imprimindo o texto na vertical através das etiquetas.
+                </p>
+              </div>
+
+              {/* 3 SOLUÇÕES: CHROME, WINDOWS E DIRETO NO SISTEMA */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                {/* SOLUÇÃO 1: NO NAVEGADOR CHROME */}
+                <div className="p-3.5 bg-white border border-slate-300 rounded-xl shadow-xs space-y-2.5">
+                  <div className="flex items-center gap-2 text-blue-700 font-bold text-xs uppercase tracking-wide">
+                    <span className="w-5 h-5 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center font-bold text-xs">
+                      1
+                    </span>
+                    <span>Na Janela do Chrome</span>
+                  </div>
+                  <p className="text-slate-600 text-[11px]">
+                    Quando você clica em Imprimir e abre a janela do navegador (Ctrl + P):
+                  </p>
+                  <ul className="space-y-1.5 text-slate-800 text-[11px]">
+                    <li className="flex items-start gap-1.5">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
+                      <span>
+                        <strong>Margens:</strong> Mudar para <strong>NENHUMA</strong> (Se deixar "Padrão", o Chrome come 20mm da etiqueta).
+                      </span>
+                    </li>
+                    <li className="flex items-start gap-1.5">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
+                      <span>
+                        <strong>Escala:</strong> Selecionar <strong>Padrão</strong> ou <strong>100%</strong>.
+                      </span>
+                    </li>
+                    <li className="flex items-start gap-1.5">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
+                      <span>
+                        <strong>Layout:</strong> Se estiver em Retrato e sair virado, experimente mudar para <strong>Paisagem</strong>.
+                      </span>
+                    </li>
+                  </ul>
+                </div>
+
+                {/* SOLUÇÃO 2: NO DRIVER WINDOWS DA ZEBRA */}
+                <div className="p-3.5 bg-white border border-slate-300 rounded-xl shadow-xs space-y-2.5">
+                  <div className="flex items-center gap-2 text-purple-700 font-bold text-xs uppercase tracking-wide">
+                    <span className="w-5 h-5 rounded-full bg-purple-100 text-purple-700 flex items-center justify-center font-bold text-xs">
+                      2
+                    </span>
+                    <span>No Driver da Zebra (Windows)</span>
+                  </div>
+                  <p className="text-slate-600 text-[11px]">
+                    Em <em>Painel de Controle &gt; Dispositivos e Impressoras &gt; Preferências de Impressão</em>:
+                  </p>
+                  <ul className="space-y-1.5 text-slate-800 text-[11px]">
+                    <li className="flex items-start gap-1.5">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
+                      <span>
+                        <strong>Tamanho da Etiqueta:</strong> Criar papel personalizado com <strong>Largura: 88,0 mm</strong> e <strong>Altura: 24,0 mm</strong>.
+                      </span>
+                    </li>
+                    <li className="flex items-start gap-1.5">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
+                      <span>
+                        <strong>Tipo de Mídia:</strong> <strong>Etiquetas com Intervalo (Gap)</strong> de 2 mm.
+                      </span>
+                    </li>
+                    <li className="flex items-start gap-1.5">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
+                      <span>
+                        <strong>Orientação:</strong> <strong>Retrato (0°)</strong>.
+                      </span>
+                    </li>
+                  </ul>
+                </div>
+
+                {/* SOLUÇÃO 3: DIRETO NO SISTEMA (SEM MEXER NO WINDOWS) */}
+                <div className="p-3.5 bg-emerald-50/80 border border-emerald-300 rounded-xl shadow-xs space-y-2.5">
+                  <div className="flex items-center gap-2 text-emerald-800 font-bold text-xs uppercase tracking-wide">
+                    <Sparkles className="w-4 h-4 text-emerald-600" />
+                    <span>Solução Direta no Sistema</span>
+                  </div>
+                  <p className="text-emerald-900 text-[11px]">
+                    Você não precisa mexer no Windows! O próprio sistema compensa o giro:
+                  </p>
+                  <div className="space-y-2 text-[11px] text-emerald-950">
+                    <div className="p-2 bg-white rounded-lg border border-emerald-200">
+                      <strong>Passo 1:</strong> Vá na aba <strong>Visualização & Ajustes</strong> e clique no botão amarelo <strong>"2. Girar -90° (Compensar)"</strong>.
+                    </div>
+                    <div className="p-2 bg-white rounded-lg border border-emerald-200">
+                      <strong>Passo 2:</strong> Clique no botão verde <strong>"Testar 1 Par Agora"</strong> para ver sair perfeitamente alinhado na Zebra.
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* DICA EXTRA: ZPL NATIVO */}
+              <div className="p-3 bg-slate-100 border border-slate-200 rounded-xl flex items-start gap-2.5 text-slate-700">
+                <Info className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
+                <div className="text-[11px] leading-relaxed">
+                  <strong>Dica Profissional (Zebra ZPL):</strong> Se você utiliza o aplicativo <em>Zebra Setup Utilities</em>, PrintNode ou comunicação direta via cabo de rede/USB, a aba <strong>Código ZPL (Zebra)</strong> gera o código nativo da Zebra que imprime com qualidade de 203 DPI laser sem depender de margens de navegador.
+                </div>
+              </div>
+            </div>
+          )}
+
           {tab === "zpl" && (
             <div className="space-y-3">
               <div className="flex items-center justify-between">
@@ -1342,11 +1570,20 @@ export function EtiquetaZebraModal({
             </button>
             <button
               type="button"
+              onClick={handlePrintTest}
+              className="px-3.5 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-300 font-bold rounded-lg text-xs transition shadow-2xs flex items-center gap-1.5 cursor-pointer active:scale-95"
+              title="Imprime apenas 1 avanço (1 par) para validar alinhamento sem desperdício de etiqueta"
+            >
+              <Printer className="w-3.5 h-3.5" />
+              <span>Testar 1 Par</span>
+            </button>
+            <button
+              type="button"
               onClick={handlePrint}
               className="px-4 py-2 bg-blue-600 hover:bg-blue-700 active:scale-95 text-white font-bold rounded-lg text-xs transition shadow-xs flex items-center gap-2 cursor-pointer"
             >
               <Printer className="w-4 h-4" />
-              <span>Imprimir na Zebra</span>
+              <span>Imprimir Todas</span>
             </button>
           </div>
         </div>
