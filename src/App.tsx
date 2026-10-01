@@ -910,6 +910,7 @@ export default function App() {
               machines={data.machines}
               operators={data.operators}
               paletes={data.paletes || []}
+              totals={data.totals}
               onSavePalete={async (palete) => {
                 await savePalete(palete);
                 await refresh();
