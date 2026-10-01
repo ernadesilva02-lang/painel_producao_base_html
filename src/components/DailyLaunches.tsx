@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from "react";
-import { Production, Order, Machine, BobinaSemiAcabada, Sector, PaleteRomaneio, ItemPaleteRomaneio } from "../types/forpack";
-import { date, kg, number, group } from "../utils/formatters";
+import { Production, Order, Machine, BobinaSemiAcabada, Sector, PaleteRomaneio, ItemPaleteRomaneio, Totals, SECTORS } from "../types/forpack";
+import { date, kg, number, group, isOrderInProduction, getOrderSectorBreakdown } from "../utils/formatters";
 import {
   saveProduction,
   saveBobinaWIP,
@@ -38,6 +38,9 @@ import {
   ChevronRight,
   Flame,
   Maximize2,
+  BarChart2,
+  Scissors,
+  RotateCcw,
 } from "lucide-react";
 
 // Palete semente correspondente exatamente à folha manuscrita de apontamento Forpack
@@ -139,6 +142,7 @@ export function DailyLaunches({
   machines,
   operators = [],
   paletes = [],
+  totals,
   onSavePalete,
   onDeletePalete,
   selectedDate,
@@ -156,6 +160,7 @@ export function DailyLaunches({
   machines: Machine[];
   operators?: string[];
   paletes?: PaleteRomaneio[];
+  totals?: Map<string, Totals>;
   onSavePalete?: (palete: PaleteRomaneio) => Promise<void>;
   onDeletePalete?: (paleteId: string) => Promise<void>;
   selectedDate: string;
@@ -427,9 +432,19 @@ export function DailyLaunches({
     if (!activeModal) return [];
     const machineId = activeModal.machine.id;
 
-    // Se o usuário alternou para ver todas as OPs da fábrica, pega todas as ativas.
-    // Padrão solicitado: APENAS as OPs programadas para as respectivas máquinas!
-    let baseList = showAllFactoryOps
+    // Padrão solicitado: pesquisa instantânea com OPs em status EM PRODUÇÃO
+    let inProdList = showAllFactoryOps
+      ? orders.filter(isOrderInProduction)
+      : orders.filter(
+          o =>
+            isOrderInProduction(o) &&
+            (o.maquinaId === machineId || (activeModal.order && o.id === activeModal.order.id))
+        );
+
+    // Se nenhuma OP tiver sido marcada ainda com status EM PRODUÇÃO, usa ativas não finalizadas como fallback
+    let baseList = inProdList.length > 0
+      ? inProdList
+      : showAllFactoryOps
       ? orders.filter(o => group(o.statusProducao) !== "Finalizado")
       : orders.filter(
           o =>
@@ -1371,6 +1386,42 @@ export function DailyLaunches({
                 </div>
               )}
 
+              {/* Resumo de Produção por Setor da OP Selecionada */}
+              {(() => {
+                const currentSelectedOp = orders.find(o => o.id === formData.opId);
+                if (!currentSelectedOp) return null;
+                const bdown = getOrderSectorBreakdown(currentSelectedOp, productionRecords, machines, totals);
+                return (
+                  <div className="mb-3 p-3 bg-blue-50/70 border border-blue-200 rounded-lg space-y-2">
+                    <div className="flex items-center justify-between text-xs font-bold text-slate-800">
+                      <div className="flex items-center gap-1.5">
+                        <BarChart2 className="w-3.5 h-3.5 text-blue-600" />
+                        <span>Resumo Produzido nos Setores</span>
+                      </div>
+                      <span className="text-[11px] font-mono text-slate-600">
+                        Total: <strong>{bdown.totalProduced.toFixed(1)} kg</strong>
+                        {bdown.plannedKg > 0 && ` (${Math.round((bdown.totalProduced / bdown.plannedKg) * 100)}%)`}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-5 gap-1 text-center">
+                      {bdown.breakdown.map((s) => (
+                        <div
+                          key={s.sector}
+                          className={`p-1.5 rounded border text-[10px] ${
+                            s.producedKg > 0
+                              ? "bg-white border-blue-300 font-bold text-blue-900 shadow-2xs"
+                              : "bg-slate-100/60 border-slate-200 text-slate-400"
+                          }`}
+                        >
+                          <div className="text-[9px] uppercase tracking-tighter truncate opacity-80">{s.sector.slice(0, 4)}</div>
+                          <div className="font-mono">{s.producedKg > 0 ? `${s.producedKg.toFixed(0)}k` : "0k"}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
+
               {/* Data da Produção e Turno */}
               <div className="form-grid">
                 <label className="field">
@@ -1691,6 +1742,9 @@ export function DailyLaunches({
           orders={orders}
           operators={operators}
           initialPalete={selectedPalete}
+          records={productionRecords}
+          machines={machines}
+          totals={totals}
           onSavePalete={async (palete) => {
             if (onSavePalete) {
               await onSavePalete(palete);
