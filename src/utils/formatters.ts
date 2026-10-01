@@ -130,3 +130,88 @@ export function group(status = ""): "Finalizado" | "Aguardando" | "Em produção
   if (s.includes("FILA") || s.includes("PRODUÇÃO") || s.includes("EXPEDIÇÃO")) return "Em produção";
   return "Programado";
 }
+
+/**
+ * Verifica estritamente se uma OP está com status ativo de produção
+ * (EM PRODUÇÃO, FILA DA ..., PRODUÇÃO, etc., excluindo Aguardando e Finalizado).
+ */
+export function isOrderInProduction(order?: Order | null): boolean {
+  if (!order) return false;
+  const status = (order.statusProducao || "").toUpperCase().trim();
+  if (!status || status === "FINALIZADO" || status.includes("AGUARDANDO PROGRAMAÇÃO")) {
+    return false;
+  }
+  return (
+    status === "EM PRODUÇÃO" ||
+    status === "EM PRODUCAO" ||
+    status.includes("PRODUÇÃO") ||
+    status.includes("PRODUCAO") ||
+    status.includes("FILA") ||
+    status.includes("EXPEDIÇÃO") ||
+    group(order.statusProducao) === "Em produção"
+  );
+}
+
+/**
+ * Calcula o resumo consolidado de quantidade produzida em cada setor fabril para uma OP
+ */
+export function getOrderSectorBreakdown(
+  order: Order,
+  records: Production[] = [],
+  machines: Machine[] = [],
+  totals?: Map<string, Totals>
+) {
+  const machineSector = new Map<string, string>();
+  machines.forEach(m => {
+    if (m.id) machineSector.set(String(m.id).toUpperCase(), (m.setor || "").toUpperCase());
+    if (m.name) machineSector.set(String(m.name).toUpperCase(), (m.setor || "").toUpperCase());
+  });
+
+  const orderMatches = (record: Production) => {
+    const idPed = String(record.idPedido || "").toLowerCase().trim();
+    const oId = String(order.id || "").toLowerCase().trim();
+    const op = String(order.numeroOp || "").toLowerCase().trim();
+    const ped = String(order.numeroPedido || "").toLowerCase().trim();
+    return idPed === oId || (op !== "" && idPed === op) || (ped !== "" && idPed === ped);
+  };
+
+  const orderRecords = records.filter(orderMatches);
+
+  const breakdown = SECTORS.map(sector => {
+    let producedKg = 0;
+    if (totals) {
+      const direct =
+        totals.get(order.id)?.[sector] ??
+        (order.numeroPedido ? totals.get(String(order.numeroPedido))?.[sector] : undefined) ??
+        (order.numeroOp ? totals.get(String(order.numeroOp))?.[sector] : undefined);
+      if (direct !== undefined && direct > 0) {
+        producedKg = direct;
+      }
+    }
+
+    if (producedKg === 0 && orderRecords.length > 0) {
+      producedKg = orderRecords
+        .filter(r => {
+          const recSector = machineSector.get(String(r.maquinaId || "").toUpperCase());
+          return recSector === sector;
+        })
+        .reduce((sum, r) => sum + number(r.qtdProduzido), 0);
+    }
+
+    return {
+      sector,
+      producedKg,
+    };
+  });
+
+  const totalProduced = breakdown.reduce((sum, b) => sum + b.producedKg, 0);
+  const plannedKg = number(order.quantidade);
+
+  return {
+    breakdown,
+    totalProduced,
+    plannedKg,
+    activeSectors: breakdown.filter(b => b.producedKg > 0),
+  };
+}
+
