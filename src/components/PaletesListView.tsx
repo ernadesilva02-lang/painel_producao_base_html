@@ -15,6 +15,7 @@ import {
 import { PaleteRomaneio, Machine } from "../types/forpack";
 import { printOfficialRomaneio } from "./PaleteRomaneioModal";
 import { EtiquetaZebraModal } from "./EtiquetaBobinaZebra";
+import { isMachineMatch } from "../utils/formatters";
 
 interface PaletesListViewProps {
   paletes: PaleteRomaneio[];
@@ -42,7 +43,7 @@ export function PaletesListView({
       .filter((p) => {
         // Sector filter
         if (selectedSector && selectedSector !== "TODOS OS SETORES" && selectedSector !== "TODOS") {
-          const mach = machines.find((m) => m.id === p.maquinaId);
+          const mach = machines.find((m) => isMachineMatch(p.maquinaId || p.maquinaNome, m));
           const machSector = (mach?.setor || p.setor || "").toUpperCase();
           if (machSector !== selectedSector.toUpperCase()) return false;
         }
@@ -51,7 +52,10 @@ export function PaletesListView({
         if (statusFilter !== "TODOS" && p.status !== statusFilter) return false;
 
         // Machine filter
-        if (machineFilter !== "TODAS" && p.maquinaId !== machineFilter) return false;
+        if (machineFilter !== "TODAS") {
+          const targetM = machines.find(m => m.id === machineFilter);
+          if (targetM && !isMachineMatch(p.maquinaId || p.maquinaNome, targetM)) return false;
+        }
 
         // Text search
         if (!term) return true;
@@ -236,6 +240,10 @@ export function PaletesListView({
               <tbody className="divide-y divide-slate-100">
                 {filteredPaletes.map((palete) => {
                   const isClosed = palete.status === "FECHADO";
+                  const mach =
+                    machines.find((m) => isMachineMatch(palete.maquinaId || palete.maquinaNome, m)) ||
+                    machines.find((m) => (m.setor || "").toUpperCase().includes("REBOBIN")) ||
+                    null;
                   return (
                     <tr
                       key={palete.id}
@@ -276,13 +284,17 @@ export function PaletesListView({
                       </td>
 
                       {/* OP & CLIENTE */}
-                      <td className="py-3 px-4 max-w-xs">
+                      <td
+                        className="py-3 px-4 max-w-xs cursor-pointer group"
+                        onClick={() => onOpenPaleteModal(palete, mach)}
+                        title="Clique para abrir e ver o romaneio deste palete"
+                      >
                         <div className="flex items-center gap-1.5">
-                          <span className="font-bold text-blue-600">
+                          <span className="font-bold text-blue-600 group-hover:underline">
                             OP #{palete.numeroOp || palete.numeroPedido || palete.opId}
                           </span>
                         </div>
-                        <span className="text-xs font-semibold text-slate-900 block truncate" title={palete.cliente}>
+                        <span className="text-xs font-semibold text-slate-900 block truncate group-hover:text-blue-900" title={palete.cliente}>
                           {palete.cliente}
                         </span>
                         <span className="text-[11px] text-slate-500 block truncate" title={palete.descricaoItem}>
@@ -356,7 +368,7 @@ export function PaletesListView({
                           {/* EDITAR / CONTINUAR */}
                           <button
                             type="button"
-                            onClick={() => onOpenPaleteModal(palete)}
+                            onClick={() => onOpenPaleteModal(palete, mach)}
                             className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-md border border-slate-200 transition cursor-pointer"
                             title={isClosed ? "Visualizar detalhes" : "Continuar pesagem"}
                           >

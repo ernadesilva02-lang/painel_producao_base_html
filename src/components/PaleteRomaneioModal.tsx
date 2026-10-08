@@ -40,6 +40,8 @@ import {
   getOrderSectorBreakdown,
   number,
   group,
+  findOrderForPalete,
+  isMachineMatch,
 } from "../utils/formatters";
 import {
   EtiquetaZebraModal,
@@ -150,9 +152,54 @@ export function PaleteRomaneioModal({
   totals,
 }: PaleteRomaneioModalProps) {
   // Pallet identification state
-  const [selectedOrder, setSelectedOrder] = useState<Order | null>(
-    activeOrder || null
+  const [selectedOrder, setSelectedOrder] = useState<Order | null>(() => {
+    if (initialPalete) {
+      return findOrderForPalete(orders, initialPalete);
+    }
+    return activeOrder || null;
+  });
+  // Helper para resolver a máquina com precisão para nunca ficar indefinida
+  const resolveMachine = (
+    propMach?: Machine | null,
+    palete?: PaleteRomaneio | null,
+    order?: Order | null,
+    allMachines?: Machine[]
+  ): Machine => {
+    if (propMach && propMach.id) return propMach;
+
+    const list = allMachines && allMachines.length > 0 ? allMachines : [];
+
+    if (palete) {
+      const match = list.find((m) =>
+        isMachineMatch(palete.maquinaId || palete.maquinaNome, m)
+      );
+      if (match) return match;
+    }
+
+    if (order?.maquinaId) {
+      const match = list.find((m) => isMachineMatch(order.maquinaId, m));
+      if (match) return match;
+    }
+
+    const rebMach = list.find(
+      (m) => (m.setor || "").toUpperCase().includes("REBOBIN")
+    );
+    if (rebMach) return rebMach;
+
+    if (list.length > 0) return list[0];
+
+    const fallbackName = palete?.maquinaNome || palete?.maquinaId || "REBOBINADEIRA";
+    return {
+      id: palete?.maquinaId || "REBOBINADEIRA",
+      name: fallbackName,
+      setor: "REBOBINADEIRA",
+    };
+  };
+
+  const [selectedMachine, setSelectedMachine] = useState<Machine>(() =>
+    resolveMachine(machine, initialPalete, activeOrder, machines)
   );
+
   const [numeroPalete, setNumeroPalete] = useState("");
   const [dataPalete, setDataPalete] = useState(() =>
     new Date().toLocaleDateString("en-CA", { timeZone: "America/Fortaleza" })
@@ -299,13 +346,13 @@ export function PaleteRomaneioModal({
       setObservacoes(initialPalete.observacoes || "");
       setItens(initialPalete.itens || []);
 
-      const foundOrder = orders.find(
-        (o) =>
-          o.id === initialPalete.opId ||
-          o.numeroOp === initialPalete.numeroOp ||
-          o.numeroPedido === initialPalete.numeroPedido
-      );
-      setSelectedOrder(foundOrder || activeOrder || null);
+      // Localiza com precisão a OP vinculada a este palete (ou reconstrói a partir dos dados do próprio palete)
+      const foundOrder = findOrderForPalete(orders, initialPalete);
+      setSelectedOrder(foundOrder);
+
+      // Sincroniza a máquina vinculada ao palete
+      const machResolved = resolveMachine(machine, initialPalete, foundOrder, machines);
+      setSelectedMachine(machResolved);
     } else {
       // New pallet
       const opNum = activeOrder?.numeroOp || activeOrder?.numeroPedido || "OP";
@@ -326,6 +373,8 @@ export function PaleteRomaneioModal({
       setObservacoes("");
       setItens([]);
       setSelectedOrder(activeOrder || null);
+      const machResolved = resolveMachine(machine, null, activeOrder, machines);
+      setSelectedMachine(machResolved);
     }
 
     setInputBruto("");
@@ -471,19 +520,19 @@ export function PaleteRomaneioModal({
 
     return {
       id,
-      numeroPalete: numeroPalete.trim() || `PAL-${Date.now().toString().slice(-4)}`,
-      opId: op?.id || "",
-      numeroOp: op?.numeroOp || "",
-      numeroPedido: op?.numeroPedido || "",
-      cliente: op?.cliente || "FORPACK CLIENTE",
-      descricaoItem: op?.descricaoItem || "PRODUTO ACABADO",
-      maquinaId: machine?.id || "REBOBINADEIRA",
-      maquinaNome: machine?.name || "REBOBINADEIRA",
-      setor: machine?.setor || "REBOBINADEIRA",
+      numeroPalete: numeroPalete.trim() || initialPalete?.numeroPalete || `PAL-${Date.now().toString().slice(-4)}`,
+      opId: op?.id || initialPalete?.opId || "",
+      numeroOp: op?.numeroOp || initialPalete?.numeroOp || "",
+      numeroPedido: op?.numeroPedido || initialPalete?.numeroPedido || "",
+      cliente: op?.cliente || initialPalete?.cliente || "FORPACK CLIENTE",
+      descricaoItem: op?.descricaoItem || initialPalete?.descricaoItem || "PRODUTO ACABADO",
+      maquinaId: selectedMachine.id,
+      maquinaNome: selectedMachine.name,
+      setor: selectedMachine.setor || "REBOBINADEIRA",
       data: dataPalete,
       turno,
-      operador: operador.trim() || "Operador",
-      auxiliar: auxiliar.trim() || undefined,
+      operador: operador.trim() || initialPalete?.operador || "Operador",
+      auxiliar: auxiliar.trim() || initialPalete?.auxiliar || undefined,
       taraPadraoTubete: taraPadrao,
       itens,
       totalVolumes: itens.length,
@@ -532,16 +581,14 @@ export function PaleteRomaneioModal({
       setErrorMsg("Selecione a Ordem de Produção (OP) vinculada a este palete.");
       return;
     }
-    if (!machine) {
-      setErrorMsg("Máquina não identificada.");
-      return;
-    }
+
+    const machToUse = selectedMachine || resolveMachine(machine, initialPalete, selectedOrder, machines);
 
     setSaving(true);
     setErrorMsg("");
     try {
       const paleteFechado = buildPaleteObject("FECHADO");
-      await onClosePaleteAndRegister(paleteFechado, selectedOrder, machine);
+      await onClosePaleteAndRegister(paleteFechado, selectedOrder, machToUse);
 
       // Trigger printing of the official Forpack Romaneio
       printOfficialRomaneio(paleteFechado);
@@ -588,7 +635,7 @@ export function PaleteRomaneioModal({
             <div>
               <div className="flex items-center gap-2 flex-wrap">
                 <span className="text-[11px] font-bold uppercase tracking-wider text-blue-400">
-                  {machine?.name || "REBOBINADEIRA"} • PRODUTO ACABADO
+                  {selectedMachine.name} • PRODUTO ACABADO
                 </span>
                 <span
                   className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
@@ -1044,7 +1091,37 @@ export function PaleteRomaneioModal({
                   </div>
                 </div>
 
-                <div className="col-span-2">
+                {/* MÁQUINA */}
+                <div className="col-span-2 sm:col-span-2">
+                  <label className="text-[11px] font-bold text-slate-700 uppercase tracking-wide block mb-1">
+                    Máquina (Rebobinadeira / Acabamento)
+                  </label>
+                  <select
+                    value={selectedMachine.id}
+                    onChange={(e) => {
+                      const found = machines.find((m) => m.id === e.target.value) || {
+                        id: e.target.value,
+                        name: e.target.value,
+                        setor: "REBOBINADEIRA",
+                      };
+                      setSelectedMachine(found);
+                    }}
+                    className="w-full bg-white border border-slate-300 rounded-md px-2.5 py-1.5 text-xs font-semibold text-slate-900 focus:ring-2 focus:ring-blue-500"
+                  >
+                    {machines.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.name} ({m.setor})
+                      </option>
+                    ))}
+                    {!machines.some((m) => m.id === selectedMachine.id) && (
+                      <option value={selectedMachine.id}>
+                        {selectedMachine.name} ({selectedMachine.setor})
+                      </option>
+                    )}
+                  </select>
+                </div>
+
+                <div className="col-span-1 sm:col-span-1">
                   <label className="text-[11px] font-bold text-slate-700 uppercase tracking-wide block mb-1">
                     Operador Responsável
                   </label>
@@ -1061,7 +1138,7 @@ export function PaleteRomaneioModal({
                   </select>
                 </div>
 
-                <div className="col-span-2">
+                <div className="col-span-1 sm:col-span-1">
                   <label className="text-[11px] font-bold text-slate-700 uppercase tracking-wide block mb-1">
                     Auxiliar de Produção
                   </label>
