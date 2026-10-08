@@ -1,6 +1,16 @@
 import React, { useState, useMemo } from "react";
 import { Production, Order, Machine, BobinaSemiAcabada, Sector, PaleteRomaneio, ItemPaleteRomaneio, Totals, SECTORS } from "../types/forpack";
-import { date, kg, number, group, isOrderInProduction, getOrderSectorBreakdown } from "../utils/formatters";
+import {
+  date,
+  kg,
+  number,
+  group,
+  isOrderInProduction,
+  getOrderSectorBreakdown,
+  findOrderForPalete,
+  findOrderForRecord,
+  isMachineMatch,
+} from "../utils/formatters";
 import {
   saveProduction,
   saveBobinaWIP,
@@ -195,12 +205,25 @@ export function DailyLaunches({
     order?: Order | null
   ) => {
     setSelectedPalete(palete);
-    setPaleteModalMachine(
-      machine || (palete ? machines.find(m => m.id === palete.maquinaId) || null : null)
-    );
-    setPaleteModalOrder(
-      order || (palete ? orders.find(o => o.id === palete.opId || o.numeroOp === palete.numeroOp) || null : null)
-    );
+    let resolvedMach: Machine | null = machine || null;
+    if (!resolvedMach && palete) {
+      resolvedMach = machines.find(m => isMachineMatch(palete.maquinaId || palete.maquinaNome, m)) || null;
+    }
+    if (!resolvedMach && order?.maquinaId) {
+      resolvedMach = machines.find(m => isMachineMatch(order.maquinaId, m)) || null;
+    }
+    if (!resolvedMach) {
+      resolvedMach = machines.find(m => (m.setor || "").toUpperCase().includes("REBOBIN")) || machines[0] || null;
+    }
+    setPaleteModalMachine(resolvedMach);
+    if (palete) {
+      // Quando abrindo um palete existente, a OP do palete SEMPRE tem prioridade absoluta!
+      const paleteOrder = findOrderForPalete(orders, palete);
+      setPaleteModalOrder(paleteOrder);
+    } else {
+      // Quando criando um NOVO palete, usa a OP ativa da máquina se fornecida
+      setPaleteModalOrder(order || null);
+    }
     setPaleteModalOpen(true);
   };
 
@@ -281,6 +304,55 @@ export function DailyLaunches({
   // Base de registros a ser considerada
   const productionRecords = allRecords && allRecords.length ? allRecords : records;
 
+  // Armazena a OP selecionada/ativa pelo operador para cada máquina (persistido no navegador)
+  const [userMachineActiveOrders, setUserMachineActiveOrders] = useState<Record<string, string>>(() => {
+    try {
+      const saved = localStorage.getItem("forpack_machine_active_orders");
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
+
+  const setUserActiveOrderForMachine = (machineId: string, orderId: string) => {
+    setUserMachineActiveOrders(prev => {
+      const updated = { ...prev, [machineId]: orderId };
+      try {
+        localStorage.setItem("forpack_machine_active_orders", JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+  };
+
+  const clearUserActiveOrderForMachine = (machineId: string) => {
+    setUserMachineActiveOrders(prev => {
+      const updated = { ...prev };
+      delete updated[machineId];
+      try {
+        localStorage.setItem("forpack_machine_active_orders", JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+  };
+
+  const [changingOrderMachineId, setChangingOrderMachineId] = useState<string | null>(null);
+  const [quickOrderFilter, setQuickOrderFilter] = useState("");
+
+  // Helper para comparar OP/Pedido com tolerância
+  const isOrderMatch = (recOrPaleteOp: string | undefined | null, order: Order): boolean => {
+    if (!recOrPaleteOp || !order) return false;
+    const target = String(recOrPaleteOp).replace(/^OP\s*#?/i, "").replace(/^PED\s*#?/i, "").trim().toLowerCase();
+    const oId = String(order.id || "").replace(/^OP\s*#?/i, "").replace(/^PED\s*#?/i, "").trim().toLowerCase();
+    const oOp = String(order.numeroOp || "").replace(/^OP\s*#?/i, "").trim().toLowerCase();
+    const oPed = String(order.numeroPedido || "").replace(/^PED\s*#?/i, "").trim().toLowerCase();
+    return (
+      (!!oId && target === oId) ||
+      (!!oOp && target === oOp) ||
+      (!!oPed && target === oPed) ||
+      (!!order.id && target === order.id.toLowerCase())
+    );
+  };
+
   // Mapa de OPs ativas programadas por Máquina
   // Regra PCP: Pedidos ativos onde order.maquinaId === machine.id, ordenados por ordemFila
   const machineQueues = useMemo(() => {
@@ -304,6 +376,159 @@ export function DailyLaunches({
     return map;
   }, [machines, orders]);
 
+  // Localiza com máxima fidelidade a OP que REALMENTE está sendo produzida no momento na máquina
+  // Prioridade:
+  // 1) Apontamentos de produção mais recentes feitos nesta máquina (chão de fábrica real onde estão sendo feitos os lançamentos)
+  // 2) Palete aberto em montagem nesta máquina agora
+  // 3) Seleção manual expressa do operador para a máquina
+  // 4) OP na fila com status "EM PRODUÇÃO"
+  // 5) Fila programada do PCP (queue[0])
+  // 6) Qualquer OP ativa desta máquina
+  const getCurrentlyProducedOrder = (
+    machine: Machine,
+    queue: Order[],
+    userSelectedOrderId?: string
+  ): {
+    order: Order | null;
+    source: "apontamento" | "palete" | "manual" | "fila" | "nenhuma";
+    latestRecord?: Production | null;
+  } => {
+    // Todos os apontamentos vinculados a esta máquina, ordenados cronologicamente pelo mais recente
+    const machineRecords = productionRecords
+      .filter(r => isMachineMatch(r.maquinaId, machine) && (!!r.idPedido || !!r.cliente))
+      .sort((a, b) => {
+        const aTime = a._updatedAt || a.dataProducao || "";
+        const bTime = b._updatedAt || b.dataProducao || "";
+        return bTime.localeCompare(aTime);
+      });
+
+    // 1. PRIORIDADE MÁXIMA: Último apontamento de produção lançado nesta máquina!
+    // Se foram feitos lançamentos, a OP onde os lançamentos estão sendo feitos é a que deve aparecer no card.
+    if (machineRecords.length > 0) {
+      for (const rec of machineRecords) {
+        const recOrder = findOrderForRecord(orders, rec);
+        if (recOrder) {
+          // Se houver seleção manual antiga do usuário mas houver lançamentos recentes,
+          // respeitamos a manual apenas se ela coincidir com o pedido ou se não houver conflito
+          if (!userSelectedOrderId || isOrderMatch(userSelectedOrderId, recOrder)) {
+            return { order: recOrder, source: "apontamento", latestRecord: rec };
+          }
+        }
+      }
+    }
+
+    // 2. Se há um palete aberto (EM MONTAGEM) nesta máquina agora
+    const openPalete = allPaletes
+      .filter(p => p.status === "ABERTO" && isMachineMatch(p.maquinaId || p.maquinaNome, machine))
+      .sort((a, b) => (b.updated_at || b.created_at || "").localeCompare(a.updated_at || a.created_at || ""))[0];
+
+    if (openPalete) {
+      const paleteOrder = findOrderForPalete(orders, openPalete);
+      if (paleteOrder) {
+        return { order: paleteOrder, source: "palete", latestRecord: machineRecords[0] || null };
+      }
+    }
+
+    // 3. Seleção manual expressa do operador para esta máquina
+    if (userSelectedOrderId) {
+      const selected = orders.find(o => isOrderMatch(userSelectedOrderId, o));
+      if (selected) {
+        return { order: selected, source: "manual", latestRecord: machineRecords[0] || null };
+      }
+    }
+
+    // Se havia apontamento mas diferia da seleção manual antiga que não foi encontrada:
+    if (machineRecords.length > 0) {
+      const fallbackRecOrder = findOrderForRecord(orders, machineRecords[0]);
+      if (fallbackRecOrder) {
+        return { order: fallbackRecOrder, source: "apontamento", latestRecord: machineRecords[0] };
+      }
+    }
+
+    // 4. Último palete fechado nesta máquina
+    const lastClosedPalete = allPaletes
+      .filter(p => p.status === "FECHADO" && isMachineMatch(p.maquinaId || p.maquinaNome, machine))
+      .sort((a, b) => (b.updated_at || b.fechado_em || "").localeCompare(a.updated_at || a.fechado_em || ""))[0];
+
+    if (lastClosedPalete) {
+      const paleteOrder = findOrderForPalete(orders, lastClosedPalete);
+      if (paleteOrder && group(paleteOrder.statusProducao) !== "Finalizado") {
+        return { order: paleteOrder, source: "palete", latestRecord: machineRecords[0] || null };
+      }
+    }
+
+    // 5. Se houver OP na fila com status "EM PRODUÇÃO"
+    const inProdOrder = queue.find(o => isOrderInProduction(o));
+    if (inProdOrder) {
+      return { order: inProdOrder, source: "fila", latestRecord: machineRecords[0] || null };
+    }
+
+    // 6. Fila programada do PCP (queue[0])
+    if (queue.length > 0) {
+      return { order: queue[0], source: "fila", latestRecord: machineRecords[0] || null };
+    }
+
+    // 7. Qualquer OP ativa desta máquina
+    const assigned = orders.find(
+      o => isMachineMatch(o.maquinaId, machine) && group(o.statusProducao) !== "Finalizado"
+    );
+    if (assigned) {
+      return { order: assigned, source: "fila", latestRecord: machineRecords[0] || null };
+    }
+
+    return { order: null, source: "nenhuma", latestRecord: machineRecords[0] || null };
+  };
+
+  const candidateOrders = useMemo(() => {
+    if (!changingOrderMachineId) return [];
+    const mach = machines.find(m => m.id === changingOrderMachineId);
+    const q = quickOrderFilter.toLowerCase().trim();
+
+    // 1. OPs com apontamentos recentes nesta máquina
+    const machRecs = productionRecords
+      .filter(r => isMachineMatch(r.maquinaId, mach))
+      .sort((a, b) => {
+        const aTime = a._updatedAt || a.dataProducao || "";
+        const bTime = b._updatedAt || b.dataProducao || "";
+        return bTime.localeCompare(aTime);
+      });
+
+    const recentOpsFromMach: Order[] = [];
+    const seenOpIds = new Set<string>();
+
+    for (const r of machRecs) {
+      const ord = findOrderForRecord(orders, r);
+      if (ord && !seenOpIds.has(ord.id)) {
+        seenOpIds.add(ord.id);
+        recentOpsFromMach.push(ord);
+        if (recentOpsFromMach.length >= 5) break;
+      }
+    }
+
+    const notFinished = orders.filter(o => group(o.statusProducao) !== "Finalizado");
+
+    const sorted = [...notFinished].sort((a, b) => {
+      const aRecent = seenOpIds.has(a.id) ? 2 : 0;
+      const bRecent = seenOpIds.has(b.id) ? 2 : 0;
+      if (aRecent !== bRecent) return bRecent - aRecent;
+
+      const aMach = isMachineMatch(a.maquinaId, mach || { id: "", name: "", setor: "" }) ? 1 : 0;
+      const bMach = isMachineMatch(b.maquinaId, mach || { id: "", name: "", setor: "" }) ? 1 : 0;
+      if (aMach !== bMach) return bMach - aMach;
+      return (a.ordemFila || 999) - (b.ordemFila || 999);
+    });
+
+    if (!q) return sorted.slice(0, 30);
+
+    return sorted.filter(
+      o =>
+        (o.numeroOp || "").toLowerCase().includes(q) ||
+        (o.numeroPedido || "").toLowerCase().includes(q) ||
+        (o.cliente || "").toLowerCase().includes(q) ||
+        (o.descricaoItem || "").toLowerCase().includes(q)
+    );
+  }, [changingOrderMachineId, quickOrderFilter, orders, machines, productionRecords]);
+
   // Filtragem de Máquinas pelo Setor Ativo e Busca
   const filteredMachines = useMemo(() => {
     let list = machines;
@@ -316,7 +541,7 @@ export function DailyLaunches({
       const q = searchQuery.toLowerCase().trim();
       list = list.filter(m => {
         const queue = machineQueues.get(m.id) || [];
-        const activeOrder = queue[0];
+        const { order: activeOrder } = getCurrentlyProducedOrder(m, queue, userMachineActiveOrders[m.id]);
         const matchMachine = m.name.toLowerCase().includes(q) || m.setor.toLowerCase().includes(q);
         const matchOrder = activeOrder && (
           (activeOrder.numeroOp || "").toLowerCase().includes(q) ||
@@ -328,7 +553,7 @@ export function DailyLaunches({
       });
     }
     return list;
-  }, [machines, activeSector, searchQuery, machineQueues]);
+  }, [machines, activeSector, searchQuery, machineQueues, userMachineActiveOrders, allPaletes, productionRecords, selectedDate]);
 
   // Encontrar Order de um registro
   const orderOf = (record: Production) =>
@@ -585,6 +810,9 @@ export function DailyLaunches({
       notify(
         `Apontamento de ${qtd} kg registrado com sucesso na máquina ${machine.name}!`
       );
+
+      // Mantém a OP apontada imediatamente visível no card da máquina
+      setUserActiveOrderForMachine(machine.id, selectedOrder.id);
 
       setActiveModal(null);
       if (onRefresh) await onRefresh();
@@ -879,27 +1107,49 @@ export function DailyLaunches({
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5 p-5 sm:p-6 bg-slate-50/40">
               {filteredMachines.map(machine => {
                 const queue = machineQueues.get(machine.id) || [];
-                const activeOrder = queue[0] || null;
+                const { order: activeOrder, source: activeOrderSource } = getCurrentlyProducedOrder(
+                  machine,
+                  queue,
+                  userMachineActiveOrders[machine.id]
+                );
                 const hasOrder = !!activeOrder;
                 const isExtrusao = machine.setor.toUpperCase().includes("EXTRUS");
                 const isRebobinadeira = machine.setor.toUpperCase().includes("REBOBIN");
 
                 // Paletes vinculados a esta máquina
                 const machinePaletes = allPaletes.filter(
-                  p => p.maquinaId === machine.id || p.maquinaNome === machine.name
+                  p => isMachineMatch(p.maquinaId || p.maquinaNome, machine)
                 );
-                const openPalete = machinePaletes.find(p => p.status === "ABERTO");
+                // Se a máquina possui uma OP ativa, prioriza palete aberto desta OP específica
+                const openPaleteForActiveOrder = activeOrder
+                  ? machinePaletes.find(
+                      p =>
+                        p.status === "ABERTO" &&
+                        isOrderMatch(p.opId || p.numeroOp || p.numeroPedido, activeOrder)
+                    )
+                  : undefined;
+                const openPalete = openPaleteForActiveOrder || machinePaletes.find(p => p.status === "ABERTO");
                 const lastClosedPalete = machinePaletes.find(p => p.status === "FECHADO");
 
-                // Apontamentos feitos nesta máquina hoje
-                const machineTodayRecords = productionRecords.filter(
-                  r => r.maquinaId === machine.id && r.dataProducao === selectedDate
+                // Todos os apontamentos feitos nesta máquina (ordenados pelo mais recente)
+                const machineAllRecords = productionRecords
+                  .filter(r => isMachineMatch(r.maquinaId, machine) && (!!r.idPedido || !!r.cliente))
+                  .sort((a, b) => {
+                    const aTime = a._updatedAt || a.dataProducao || "";
+                    const bTime = b._updatedAt || b.dataProducao || "";
+                    return bTime.localeCompare(aTime);
+                  });
+
+                // Apontamentos feitos nesta máquina na data selecionada
+                const machineTodayRecords = machineAllRecords.filter(
+                  r => r.dataProducao === selectedDate
                 );
                 const machineTodayKg = machineTodayRecords.reduce(
                   (sum, r) => sum + number(r.qtdProduzido),
                   0
                 );
-                const lastRecord = machineTodayRecords[machineTodayRecords.length - 1] || null;
+                // Último apontamento registrado na máquina (da data selecionada ou o mais recente geral)
+                const lastRecord = machineTodayRecords[0] || machineAllRecords[0] || null;
 
                 // Progresso da OP ativa se houver
                 const targetKg = activeOrder ? number(activeOrder.quantidade) : 0;
@@ -907,10 +1157,14 @@ export function DailyLaunches({
                   ? productionRecords
                       .filter(
                         r =>
-                          (r.idPedido === activeOrder.id ||
-                            r.idPedido === activeOrder.numeroOp ||
-                            r.idPedido === activeOrder.numeroPedido) &&
-                          r.maquinaId === machine.id
+                          (isOrderMatch(r.idPedido, activeOrder) ||
+                            (r.cliente &&
+                              activeOrder.cliente &&
+                              r.cliente.trim().toLowerCase() === activeOrder.cliente.trim().toLowerCase() &&
+                              r.descricaoItem &&
+                              activeOrder.descricaoItem &&
+                              r.descricaoItem.trim().toLowerCase() === activeOrder.descricaoItem.trim().toLowerCase())) &&
+                          isMachineMatch(r.maquinaId, machine)
                       )
                       .reduce((sum, r) => sum + number(r.qtdProduzido), 0)
                   : 0;
@@ -957,28 +1211,155 @@ export function DailyLaunches({
                       {/* CONTEÚDO CENTRAL: DETALHES DA OP ATIVA */}
                       {hasOrder ? (
                         <div className="py-3.5 space-y-2.5">
-                          {/* OP E FILA */}
-                          <div className="flex items-center justify-between gap-2">
-                            <button
-                              type="button"
-                              onClick={() => onOpen(activeOrder)}
-                              className="text-xs font-bold text-blue-600 hover:text-blue-800 hover:underline cursor-pointer bg-transparent border-0 p-0 text-left"
-                              title="Abrir detalhes deste pedido"
-                            >
-                              OP #{activeOrder.numeroOp || activeOrder.numeroPedido || activeOrder.id}
-                            </button>
-                            {queue.length > 1 && (
-                              <span className="text-[10px] font-semibold text-slate-600 bg-slate-100 px-2 py-0.5 rounded border border-slate-200 shrink-0">
-                                +{queue.length - 1} na fila
-                              </span>
-                            )}
+                          {/* OP, ORIGEM E TROCA RÁPIDA DE FILA */}
+                          <div className="flex items-center justify-between gap-2 flex-wrap">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <button
+                                type="button"
+                                onClick={() => onOpen(activeOrder)}
+                                className="text-xs font-bold text-blue-600 hover:text-blue-800 hover:underline cursor-pointer bg-transparent border-0 p-0 text-left"
+                                title="Abrir detalhes deste pedido"
+                              >
+                                OP #{activeOrder.numeroOp || activeOrder.numeroPedido || activeOrder.id}
+                              </button>
+
+                              {/* Badge indicando a origem da OP em linha */}
+                              {activeOrderSource === "apontamento" && (
+                                <span className="text-[9px] font-bold text-emerald-800 bg-emerald-50 border border-emerald-300 px-1.5 py-0.2 rounded" title="Detectado a partir dos lançamentos de produção desta máquina">
+                                  ● Em Produção
+                                </span>
+                              )}
+                              {activeOrderSource === "palete" && (
+                                <span className="text-[9px] font-bold text-amber-800 bg-amber-100 border border-amber-300 px-1.5 py-0.2 rounded" title="Detectado a partir do palete aberto na máquina">
+                                  ● Palete Ativo
+                                </span>
+                              )}
+                              {activeOrderSource === "manual" && (
+                                <span className="text-[9px] font-bold text-purple-800 bg-purple-100 border border-purple-300 px-1.5 py-0.2 rounded" title="Definido pelo operador para esta máquina">
+                                  ● Em Linha
+                                </span>
+                              )}
+                              {activeOrderSource === "fila" && (
+                                <span className="text-[9px] font-medium text-slate-600 bg-slate-100 border border-slate-300 px-1.5 py-0.2 rounded" title="Programado na fila PCP desta máquina">
+                                  Fila PCP
+                                </span>
+                              )}
+                            </div>
+
+                            {/* BOTÃO TROCAR OP EM LINHA */}
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setChangingOrderMachineId(changingOrderMachineId === machine.id ? null : machine.id);
+                                  setQuickOrderFilter("");
+                                }}
+                                className="text-[10px] font-bold text-blue-700 hover:text-blue-900 bg-blue-50 hover:bg-blue-100 border border-blue-200 px-2 py-0.5 rounded transition flex items-center gap-1 cursor-pointer"
+                                title="Trocar ou selecionar qual OP está sendo produzida nesta máquina agora"
+                              >
+                                <RotateCcw size={10} className="text-blue-600" />
+                                <span>Trocar OP</span>
+                              </button>
+                              {queue.length > 1 && (
+                                <span className="text-[10px] font-semibold text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200" title={`${queue.length} OPs na fila PCP`}>
+                                  +{queue.length - 1} na fila
+                                </span>
+                              )}
+                            </div>
                           </div>
+
+                          {/* POPOVER DE SELEÇÃO RÁPIDA DA OP EM PRODUÇÃO */}
+                          {changingOrderMachineId === machine.id && (
+                            <div className="p-3 bg-slate-50 border-2 border-blue-400 rounded-lg shadow-md space-y-2 animate-in fade-in-50 duration-150">
+                              <div className="flex items-center justify-between">
+                                <span className="text-[11px] font-bold text-slate-900">
+                                  Trocar OP em produção na {machine.name}:
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setChangingOrderMachineId(null);
+                                    setQuickOrderFilter("");
+                                  }}
+                                  className="text-slate-400 hover:text-slate-700 p-0.5 cursor-pointer"
+                                >
+                                  <X size={14} />
+                                </button>
+                              </div>
+
+                              {userMachineActiveOrders[machine.id] && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    clearUserActiveOrderForMachine(machine.id);
+                                    setChangingOrderMachineId(null);
+                                    setQuickOrderFilter("");
+                                    notify(`Seleção manual limpa na ${machine.name}. Agora segue os lançamentos automáticos!`);
+                                  }}
+                                  className="w-full text-center py-1 text-[11px] font-semibold text-blue-700 hover:text-blue-900 bg-blue-50 hover:bg-blue-100 rounded border border-blue-200 transition cursor-pointer flex items-center justify-center gap-1"
+                                >
+                                  <RotateCcw size={11} />
+                                  <span>Restaurar Detecção dos Lançamentos</span>
+                                </button>
+                              )}
+
+                              <div className="relative">
+                                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2" />
+                                <input
+                                  type="text"
+                                  value={quickOrderFilter}
+                                  onChange={(e) => setQuickOrderFilter(e.target.value)}
+                                  placeholder="Buscar OP, Cliente ou Item..."
+                                  className="w-full pl-8 pr-2.5 py-1 text-xs bg-white border border-slate-300 rounded focus:ring-1 focus:ring-blue-500 outline-none"
+                                  autoFocus
+                                />
+                              </div>
+
+                              <div className="max-h-48 overflow-y-auto divide-y divide-slate-100 bg-white border border-slate-200 rounded">
+                                {candidateOrders.length === 0 ? (
+                                  <p className="p-3 text-center text-xs text-slate-400">Nenhuma OP encontrada</p>
+                                ) : (
+                                  candidateOrders.map(ord => {
+                                    const isCurrent = activeOrder?.id === ord.id;
+                                    return (
+                                      <button
+                                        key={ord.id}
+                                        type="button"
+                                        onClick={() => {
+                                          setUserActiveOrderForMachine(machine.id, ord.id);
+                                          setChangingOrderMachineId(null);
+                                          setQuickOrderFilter("");
+                                          notify(`OP #${ord.numeroOp || ord.numeroPedido || ord.id} definida como ativa na ${machine.name}!`);
+                                        }}
+                                        className={`w-full text-left p-2 hover:bg-blue-50/80 transition flex flex-col gap-0.5 cursor-pointer ${
+                                          isCurrent ? "bg-blue-50 border-l-4 border-blue-600 font-semibold" : ""
+                                        }`}
+                                      >
+                                        <div className="flex items-center justify-between text-xs">
+                                          <span className="font-bold text-blue-700">OP #{ord.numeroOp || ord.numeroPedido || ord.id}</span>
+                                          <span className="text-[10px] text-slate-500 truncate max-w-[150px]">{ord.cliente}</span>
+                                        </div>
+                                        <p className="text-[11px] text-slate-600 truncate">{ord.descricaoItem}</p>
+                                      </button>
+                                    );
+                                  })
+                                )}
+                              </div>
+                            </div>
+                          )}
 
                           {/* CLIENTE E PRODUTO (Estilo Pedidos / OP) */}
                           <div>
-                            <strong className="text-xs font-bold text-slate-900 block truncate" title={activeOrder.cliente}>
-                              {activeOrder.cliente}
-                            </strong>
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <strong className="text-xs font-bold text-slate-900 truncate" title={activeOrder.cliente}>
+                                {activeOrder.cliente}
+                              </strong>
+                              {activeOrder.material && (
+                                <span className="text-[9px] font-semibold text-slate-600 bg-slate-100 px-1 py-0.2 rounded border border-slate-200">
+                                  {activeOrder.material}
+                                </span>
+                              )}
+                            </div>
                             <span className="text-[11px] text-slate-500 line-clamp-2 mt-0.5 leading-relaxed" title={activeOrder.descricaoItem}>
                               {activeOrder.descricaoItem}
                             </span>
@@ -1007,8 +1388,14 @@ export function DailyLaunches({
                               Hoje: <strong className="text-slate-700 font-semibold">{machineTodayKg.toLocaleString("pt-BR", { maximumFractionDigits: 1 })} kg</strong>
                             </span>
                             {lastRecord && (
-                              <span className="text-emerald-700 font-medium">
-                                Último: {lastRecord.qtdProduzido} kg
+                              <span
+                                className="text-emerald-700 font-medium"
+                                title={`Último apontamento: ${lastRecord.qtdProduzido} kg por ${lastRecord.operador || "Operador"} em ${lastRecord.dataProducao}`}
+                              >
+                                Último: <strong>{lastRecord.qtdProduzido} kg</strong>
+                                {lastRecord.dataProducao && lastRecord.dataProducao !== selectedDate ? (
+                                  <span className="text-slate-400 font-normal ml-0.5">({lastRecord.dataProducao.slice(5).replace("-", "/")})</span>
+                                ) : null}
                               </span>
                             )}
                           </div>
@@ -1032,7 +1419,7 @@ export function DailyLaunches({
                               </div>
                               <button
                                 type="button"
-                                onClick={() => handleOpenPaleteModal(openPalete, machine, activeOrder)}
+                                onClick={() => handleOpenPaleteModal(openPalete, machine, null)}
                                 className="h-6.5 px-2 bg-amber-500 hover:bg-amber-600 active:scale-95 text-slate-950 font-bold rounded text-[11px] transition shadow-2xs cursor-pointer flex items-center gap-1"
                               >
                                 <span>Pesar</span>
@@ -1069,7 +1456,7 @@ export function DailyLaunches({
                         <div className="flex items-center gap-1.5">
                           <button
                             type="button"
-                            onClick={() => handleOpenPaleteModal(openPalete || null, machine, activeOrder)}
+                            onClick={() => handleOpenPaleteModal(openPalete || null, machine, openPalete ? null : activeOrder)}
                             className="h-8.5 px-2.5 bg-white hover:bg-blue-50 text-blue-700 border border-blue-200 rounded-md text-xs font-semibold transition flex items-center justify-center gap-1 cursor-pointer shadow-2xs active:scale-95"
                             title="Montar palete de produto acabado com romaneio impresso"
                           >
