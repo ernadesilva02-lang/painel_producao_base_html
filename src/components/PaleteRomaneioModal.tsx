@@ -124,7 +124,7 @@ interface PaleteRomaneioModalProps {
   orders: Order[];
   operators: string[];
   initialPalete?: PaleteRomaneio | null;
-  onSavePalete: (palete: PaleteRomaneio) => Promise<void>;
+  onSavePalete: (palete: PaleteRomaneio, silent?: boolean) => Promise<void>;
   onClosePaleteAndRegister: (
     palete: PaleteRomaneio,
     order: Order,
@@ -243,6 +243,16 @@ export function PaleteRomaneioModal({
 
   const inputBrutoRef = useRef<HTMLInputElement>(null);
 
+  // Identificador único estável do palete (para persistência e auto-salvamento imediato)
+  const [paleteId, setPaleteId] = useState<string>(
+    () => initialPalete?.id || `palete-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+  );
+  const initializedKeyRef = useRef<string | null>(null);
+  const [autoSaving, setAutoSaving] = useState(false);
+  const [lastAutoSavedAt, setLastAutoSavedAt] = useState<string | null>(null);
+  const isSavingRef = useRef(false);
+  const pendingSaveRef = useRef<PaleteRomaneio | null>(null);
+
   // Full screen mode state (defaults to true as requested for operational ease)
   const [isFullScreen, setIsFullScreen] = useState(true);
 
@@ -333,9 +343,20 @@ export function PaleteRomaneioModal({
 
   // Initialize or reset form when modal opens or initialPalete changes
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen) {
+      initializedKeyRef.current = null;
+      return;
+    }
+
+    const currentKey = initialPalete ? initialPalete.id : "new_pallet";
+    // Evita resetar o formulário se o componente pai disparar re-render/refresh enquanto o modal está aberto
+    if (initializedKeyRef.current === currentKey) {
+      return;
+    }
+    initializedKeyRef.current = currentKey;
 
     if (initialPalete) {
+      setPaleteId(initialPalete.id);
       setNumeroPalete(initialPalete.numeroPalete);
       setDataPalete(initialPalete.data);
       setTurno(initialPalete.turno || "1º Turno (06h - 14h)");
@@ -344,7 +365,19 @@ export function PaleteRomaneioModal({
       setTaraPadrao(initialPalete.taraPadraoTubete || 1.6);
       setStatus(initialPalete.status || "ABERTO");
       setObservacoes(initialPalete.observacoes || "");
-      setItens(initialPalete.itens || []);
+
+      // Recupera itens do palete ou de rascunho local mais recente se houver
+      let loadedItens = initialPalete.itens || [];
+      try {
+        const localDraft = localStorage.getItem(`forpack_draft_palete_${initialPalete.id}`);
+        if (localDraft) {
+          const parsed = JSON.parse(localDraft) as PaleteRomaneio;
+          if (Array.isArray(parsed.itens) && parsed.itens.length > loadedItens.length) {
+            loadedItens = parsed.itens;
+          }
+        }
+      } catch {}
+      setItens(loadedItens);
 
       // Localiza com precisão a OP vinculada a este palete (ou reconstrói a partir dos dados do próprio palete)
       const foundOrder = findOrderForPalete(orders, initialPalete);
@@ -354,7 +387,10 @@ export function PaleteRomaneioModal({
       const machResolved = resolveMachine(machine, initialPalete, foundOrder, machines);
       setSelectedMachine(machResolved);
     } else {
-      // New pallet
+      // Novo palete: gera id estável e dados iniciais
+      const newId = `palete-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      setPaleteId(newId);
+
       const opNum = activeOrder?.numeroOp || activeOrder?.numeroPedido || "OP";
       const randomSeq = Math.floor(1 + Math.random() * 99)
         .toString()
@@ -385,7 +421,7 @@ export function PaleteRomaneioModal({
     setTimeout(() => {
       inputBrutoRef.current?.focus();
     }, 150);
-  }, [isOpen, initialPalete, activeOrder, orders, operators]);
+  }, [isOpen, initialPalete?.id]);
 
   // Derived calculations
   const totalVolumes = itens.length;
@@ -412,7 +448,120 @@ export function PaleteRomaneioModal({
     currentProspectiveBruto - currentProspectiveTara
   );
 
-  // Add item from fast weighing input
+  // Compile current pallet object (suporta itens customizados para auto-salvamento imediato)
+  const buildPaleteObject = (
+    customItensOrStatus?: ItemPaleteRomaneio[] | StatusPalete,
+    forcedStatus?: StatusPalete
+  ): PaleteRomaneio => {
+    let itemsToUse = itens;
+    let statusToUse: StatusPalete = forcedStatus || status;
+
+    if (Array.isArray(customItensOrStatus)) {
+      itemsToUse = customItensOrStatus;
+    } else if (typeof customItensOrStatus === "string") {
+      statusToUse = customItensOrStatus;
+    }
+
+    const calcBruto = itemsToUse.reduce((sum, item) => sum + (Number(item.pesoBruto) || 0), 0);
+    const calcTara = itemsToUse.reduce((sum, item) => sum + (Number(item.tara) || 0), 0);
+    const calcLiquido = itemsToUse.reduce((sum, item) => sum + (Number(item.pesoLiquido) || 0), 0);
+
+    const id = paleteId || initialPalete?.id || `palete-${Date.now()}`;
+    const op = selectedOrder;
+
+    return {
+      id,
+      numeroPalete: numeroPalete.trim() || initialPalete?.numeroPalete || `PAL-${Date.now().toString().slice(-4)}`,
+      opId: op?.id || initialPalete?.opId || "",
+      numeroOp: op?.numeroOp || initialPalete?.numeroOp || "",
+      numeroPedido: op?.numeroPedido || initialPalete?.numeroPedido || "",
+      cliente: op?.cliente || initialPalete?.cliente || "FORPACK CLIENTE",
+      descricaoItem: op?.descricaoItem || initialPalete?.descricaoItem || "PRODUTO ACABADO",
+      maquinaId: selectedMachine.id,
+      maquinaNome: selectedMachine.name,
+      setor: selectedMachine.setor || "REBOBINADEIRA",
+      data: dataPalete,
+      turno,
+      operador: operador.trim() || initialPalete?.operador || "Operador",
+      auxiliar: auxiliar.trim() || initialPalete?.auxiliar || undefined,
+      taraPadraoTubete: taraPadrao,
+      itens: itemsToUse,
+      totalVolumes: itemsToUse.length,
+      pesoBrutoTotal: Math.round(calcBruto * 100) / 100,
+      taraTotal: Math.round(calcTara * 100) / 100,
+      pesoLiquidoTotal: Math.round(calcLiquido * 100) / 100,
+      status: statusToUse,
+      observacoes: observacoes.trim() || undefined,
+      created_at: initialPalete?.created_at || new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      fechado_em:
+        statusToUse === "FECHADO"
+          ? initialPalete?.fechado_em || new Date().toISOString()
+          : undefined,
+    };
+  };
+
+  // Auto-salva imediatamente no Supabase e no localStorage a cada bobina manipulada
+  const persistPalete = async (paleteToSave: PaleteRomaneio, feedbackMsg?: string) => {
+    // 1. Grava instantaneamente no localStorage para segurança máxima contra fechamento acidental
+    try {
+      localStorage.setItem(`forpack_draft_palete_${paleteToSave.id}`, JSON.stringify(paleteToSave));
+    } catch {}
+
+    // 2. Fila sequencial caso o operador pese várias bobinas muito rapidamente
+    if (isSavingRef.current) {
+      pendingSaveRef.current = paleteToSave;
+      return;
+    }
+
+    isSavingRef.current = true;
+    setAutoSaving(true);
+
+    try {
+      await onSavePalete(paleteToSave, true);
+      const timeStr = new Date().toLocaleTimeString("pt-BR", {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      });
+      setLastAutoSavedAt(timeStr);
+      if (feedbackMsg) {
+        setSuccessToast(feedbackMsg);
+        setTimeout(() => setSuccessToast(""), 3500);
+      }
+    } catch (err) {
+      console.warn("Falha no auto-salvamento em nuvem do palete:", err);
+      // O rascunho já está preservado localmente
+      if (feedbackMsg) {
+        setSuccessToast(`${feedbackMsg} (salvo localmente)`);
+        setTimeout(() => setSuccessToast(""), 3500);
+      }
+    } finally {
+      isSavingRef.current = false;
+      setAutoSaving(false);
+
+      if (pendingSaveRef.current) {
+        const next = pendingSaveRef.current;
+        pendingSaveRef.current = null;
+        persistPalete(next);
+      }
+    }
+  };
+
+  // Fechamento seguro: se houver bobinas apontadas e o palete estiver em montagem, garante persistência
+  const handleSafeClose = async () => {
+    if (itens.length > 0 && status === "ABERTO") {
+      const palete = buildPaleteObject(itens, "ABERTO");
+      try {
+        await onSavePalete(palete, true);
+      } catch (err) {
+        console.warn("Auto-save on close error:", err);
+      }
+    }
+    onClose();
+  };
+
+  // Add item from fast weighing input com auto-salvamento imediato
   const handleAddBobina = () => {
     const bruto = parseFloat(inputBruto.replace(",", "."));
     if (isNaN(bruto) || bruto <= 0) {
@@ -446,12 +595,18 @@ export function PaleteRomaneioModal({
       horario: nowTime,
     };
 
-    setItens((prev) => [...prev, newItem]);
+    const updatedItens = [...itens, newItem];
+    setItens(updatedItens);
     setInputBruto("");
     if (useCustomTara) setInputTaraCustom("");
     setErrorMsg("");
-    setSuccessToast(`Bobina #${nextPos} adicionada: ${liquido.toFixed(1)} kg líquido.`);
-    setTimeout(() => setSuccessToast(""), 3000);
+
+    // Auto-salva imediatamente o palete com a nova bobina adicionada
+    const paleteToSave = buildPaleteObject(updatedItens, "ABERTO");
+    persistPalete(
+      paleteToSave,
+      `Bobina #${nextPos} adicionada: ${liquido.toFixed(1)} kg líquido (Salvo automaticamente)`
+    );
 
     // Impressão automática na Zebra se a opção estiver ligada pelo operador
     if (autoPrintZebra) {
@@ -464,7 +619,7 @@ export function PaleteRomaneioModal({
           pesoLiquido: newItem.pesoLiquido,
           horario: newItem.horario,
         };
-        const cfg = inferEtiquetaZebraData(selectedOrder, buildPaleteObject());
+        const cfg = inferEtiquetaZebraData(selectedOrder, paleteToSave);
         printEtiquetasZebra([itemToPrint], cfg);
       } catch (err) {
         console.error("Erro na impressão automática da etiqueta Zebra:", err);
@@ -485,72 +640,39 @@ export function PaleteRomaneioModal({
   };
 
   const handleRemoveItem = (posicao: number) => {
-    setItens((prev) =>
-      prev
-        .filter((i) => i.posicao !== posicao)
-        .map((item, idx) => ({
-          ...item,
-          posicao: idx + 1,
-          codigoBobina: `BOB-${(idx + 1).toString().padStart(2, "0")}`,
-        }))
-    );
+    const updatedItens = itens
+      .filter((i) => i.posicao !== posicao)
+      .map((item, idx) => ({
+        ...item,
+        posicao: idx + 1,
+        codigoBobina: `BOB-${(idx + 1).toString().padStart(2, "0")}`,
+      }));
+
+    setItens(updatedItens);
+    const paleteToSave = buildPaleteObject(updatedItens, "ABERTO");
+    persistPalete(paleteToSave, `Bobina #${posicao} removida (Auto-salvo)`);
   };
 
   const handleUpdateItemWeight = (posicao: number, novoBrutoStr: string) => {
     const novoBruto = parseFloat(novoBrutoStr.replace(",", "."));
     if (isNaN(novoBruto) || novoBruto <= 0) return;
 
-    setItens((prev) =>
-      prev.map((item) => {
-        if (item.posicao !== posicao) return item;
-        const liquido = Math.round((novoBruto - item.tara) * 100) / 100;
-        return {
-          ...item,
-          pesoBruto: Math.round(novoBruto * 100) / 100,
-          pesoLiquido: liquido,
-        };
-      })
-    );
+    const updatedItens = itens.map((item) => {
+      if (item.posicao !== posicao) return item;
+      const liquido = Math.round((novoBruto - item.tara) * 100) / 100;
+      return {
+        ...item,
+        pesoBruto: Math.round(novoBruto * 100) / 100,
+        pesoLiquido: liquido,
+      };
+    });
+
+    setItens(updatedItens);
+    const paleteToSave = buildPaleteObject(updatedItens, "ABERTO");
+    persistPalete(paleteToSave, `Bobina #${posicao} recalculada (Auto-salvo)`);
   };
 
-  // Compile current pallet object
-  const buildPaleteObject = (forcedStatus?: StatusPalete): PaleteRomaneio => {
-    const id = initialPalete?.id || `palete-${Date.now()}`;
-    const op = selectedOrder;
-
-    return {
-      id,
-      numeroPalete: numeroPalete.trim() || initialPalete?.numeroPalete || `PAL-${Date.now().toString().slice(-4)}`,
-      opId: op?.id || initialPalete?.opId || "",
-      numeroOp: op?.numeroOp || initialPalete?.numeroOp || "",
-      numeroPedido: op?.numeroPedido || initialPalete?.numeroPedido || "",
-      cliente: op?.cliente || initialPalete?.cliente || "FORPACK CLIENTE",
-      descricaoItem: op?.descricaoItem || initialPalete?.descricaoItem || "PRODUTO ACABADO",
-      maquinaId: selectedMachine.id,
-      maquinaNome: selectedMachine.name,
-      setor: selectedMachine.setor || "REBOBINADEIRA",
-      data: dataPalete,
-      turno,
-      operador: operador.trim() || initialPalete?.operador || "Operador",
-      auxiliar: auxiliar.trim() || initialPalete?.auxiliar || undefined,
-      taraPadraoTubete: taraPadrao,
-      itens,
-      totalVolumes: itens.length,
-      pesoBrutoTotal: Math.round(pesoBrutoTotal * 100) / 100,
-      taraTotal: Math.round(taraTotal * 100) / 100,
-      pesoLiquidoTotal: Math.round(pesoLiquidoTotal * 100) / 100,
-      status: forcedStatus || status,
-      observacoes: observacoes.trim() || undefined,
-      created_at: initialPalete?.created_at || new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-      fechado_em:
-        forcedStatus === "FECHADO" || status === "FECHADO"
-          ? initialPalete?.fechado_em || new Date().toISOString()
-          : undefined,
-    };
-  };
-
-  // Save draft (keeps pallet open)
+  // Save draft manual
   const handleSaveDraft = async () => {
     if (itens.length === 0) {
       setErrorMsg("Adicione ao menos uma bobina pesada para salvar o palete.");
@@ -559,8 +681,11 @@ export function PaleteRomaneioModal({
     setSaving(true);
     setErrorMsg("");
     try {
-      const palete = buildPaleteObject("ABERTO");
-      await onSavePalete(palete);
+      const palete = buildPaleteObject(itens, "ABERTO");
+      await onSavePalete(palete, false);
+      try {
+        localStorage.setItem(`forpack_draft_palete_${palete.id}`, JSON.stringify(palete));
+      } catch {}
       onClose();
     } catch (err) {
       setErrorMsg(
@@ -587,8 +712,13 @@ export function PaleteRomaneioModal({
     setSaving(true);
     setErrorMsg("");
     try {
-      const paleteFechado = buildPaleteObject("FECHADO");
+      const paleteFechado = buildPaleteObject(itens, "FECHADO");
       await onClosePaleteAndRegister(paleteFechado, selectedOrder, machToUse);
+
+      // Limpa rascunho temporário do localStorage pois o palete foi oficialmente fechado
+      try {
+        localStorage.removeItem(`forpack_draft_palete_${paleteFechado.id}`);
+      } catch {}
 
       // Trigger printing of the official Forpack Romaneio
       printOfficialRomaneio(paleteFechado);
@@ -651,6 +781,22 @@ export function PaleteRomaneioModal({
                     OP #{selectedOrder.numeroOp || selectedOrder.numeroPedido || selectedOrder.id}
                   </span>
                 )}
+
+                {/* INDICADOR DE AUTO-SALVAMENTO EM TEMPO REAL */}
+                {autoSaving ? (
+                  <span className="text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-blue-500/20 text-blue-300 border border-blue-500/30 flex items-center gap-1.5 animate-pulse">
+                    <span className="w-1.5 h-1.5 rounded-full bg-blue-400" />
+                    Auto-salvando...
+                  </span>
+                ) : lastAutoSavedAt ? (
+                  <span
+                    className="text-[10px] font-semibold px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-1 shadow-2xs"
+                    title={`Último auto-salvamento: ${lastAutoSavedAt}`}
+                  >
+                    <Check className="w-3 h-3 text-emerald-400 stroke-[2.5]" />
+                    Auto-salvo às {lastAutoSavedAt}
+                  </span>
+                ) : null}
               </div>
               <h2 className="text-lg font-bold text-white tracking-tight">
                 Romaneio de Palete & Fechamento de Produção
@@ -704,9 +850,9 @@ export function PaleteRomaneioModal({
 
             <button
               type="button"
-              onClick={onClose}
-              className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition"
-              title="Fechar painel"
+              onClick={handleSafeClose}
+              className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition cursor-pointer"
+              title="Fechar painel (garante que bobinas lançadas continuam salvas)"
             >
               <X className="w-5 h-5" />
             </button>
@@ -1162,7 +1308,7 @@ export function PaleteRomaneioModal({
                     </h3>
                   </div>
                   <span className="text-[11px] text-blue-200">
-                    Dica: Digite o peso bruto e aperte <strong>ENTER</strong> para lançar
+                    Dica: Digite o peso bruto e aperte <strong>ENTER</strong> para lançar e auto-salvar
                   </span>
                 </div>
 
@@ -1660,14 +1806,20 @@ export function PaleteRomaneioModal({
         {/* RODAPÉ FIXO DE AÇÕES COM BOTÕES GRANDES E DE FÁCIL ACESSO OPERACIONAL */}
         <div className="bg-slate-50 px-6 py-4 border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-4 shrink-0 shadow-lg">
           <div className="flex items-center gap-3 w-full sm:w-auto">
-            {initialPalete && onDeletePalete && (
+            {(initialPalete || itens.length > 0) && onDeletePalete && (
               <button
                 type="button"
                 onClick={async () => {
-                  if (confirm("Tem certeza que deseja excluir este palete?")) {
+                  if (confirm("Tem certeza que deseja excluir este palete e todas as suas bobinas?")) {
                     setSaving(true);
                     try {
-                      await onDeletePalete(initialPalete.id);
+                      const targetId = initialPalete?.id || paleteId;
+                      if (targetId) {
+                        await onDeletePalete(targetId);
+                        try {
+                          localStorage.removeItem(`forpack_draft_palete_${targetId}`);
+                        } catch {}
+                      }
                       onClose();
                     } catch (e) {
                       setErrorMsg("Erro ao excluir palete.");
@@ -1695,7 +1847,7 @@ export function PaleteRomaneioModal({
           <div className="flex items-center gap-3 w-full sm:w-auto justify-end">
             <button
               type="button"
-              onClick={onClose}
+              onClick={handleSafeClose}
               className="px-5 py-3 text-xs font-semibold text-slate-600 hover:text-slate-800 transition cursor-pointer"
             >
               Cancelar

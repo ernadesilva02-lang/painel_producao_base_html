@@ -17,6 +17,10 @@ import {
   CheckCircle2,
   Info,
   ArrowRight,
+  ArrowDown,
+  RotateCw,
+  RefreshCw,
+  Compass,
 } from "lucide-react";
 import { Order, ItemPaleteRomaneio, PaleteRomaneio } from "../types/forpack";
 
@@ -35,6 +39,11 @@ export interface EtiquetaZebraData {
   incluirIdentificacaoOp?: boolean; // Padrão false para manter layout limpo idêntico à Foto 2
   codigoOp?: string;
   numeroPalete?: string;
+  // Campos de ajuste avançado de direção e envio para impressoras térmicas
+  modoEnvioCss?: "dimensoes_puras" | "auto" | "forcar_paisagem" | "forcar_retrato" | "tamanho_invertido";
+  deslocamentoVerticalMm?: number; // Ajuste fino -5mm a +5mm
+  deslocamentoHorizontalMm?: number; // Ajuste fino -5mm a +5mm
+  espacamentoColunasMm?: number; // Gap entre as duas pistas, padrão 2mm
 }
 
 export interface EtiquetaBobinaItem {
@@ -46,9 +55,64 @@ export interface EtiquetaBobinaItem {
   horario?: string;
 }
 
+export const ZEBRA_CONFIG_STORAGE_KEY = "forpack_etiqueta_zebra_config";
+
+/**
+ * Carrega preferências da impressora Zebra salvas pelo operador neste terminal
+ */
+export function loadSavedEtiquetaZebraPreferences(): Partial<EtiquetaZebraData> {
+  try {
+    const raw = localStorage.getItem(ZEBRA_CONFIG_STORAGE_KEY);
+    if (raw) {
+      return JSON.parse(raw);
+    }
+  } catch (err) {
+    console.warn("Erro ao carregar preferências da Zebra:", err);
+  }
+  return {};
+}
+
+/**
+ * Salva permanentemente as preferências de sentido e formato de etiqueta para próximas impressões
+ */
+export function saveEtiquetaZebraPreferences(config: Partial<EtiquetaZebraData>): void {
+  try {
+    const prev = loadSavedEtiquetaZebraPreferences();
+    const toSave: Partial<EtiquetaZebraData> = {
+      ...prev,
+      tamanhoEtiqueta: config.tamanhoEtiqueta ?? prev.tamanhoEtiqueta,
+      larguraMm: config.larguraMm ?? prev.larguraMm,
+      alturaMm: config.alturaMm ?? prev.alturaMm,
+      orientacao: config.orientacao ?? prev.orientacao,
+      formatoRolo: config.formatoRolo ?? prev.formatoRolo,
+      duplicarPistas: config.duplicarPistas ?? prev.duplicarPistas,
+      imprimirPesos: config.imprimirPesos ?? prev.imprimirPesos,
+      incluirIdentificacaoOp: config.incluirIdentificacaoOp ?? prev.incluirIdentificacaoOp,
+      modoEnvioCss: config.modoEnvioCss ?? prev.modoEnvioCss,
+      deslocamentoVerticalMm: config.deslocamentoVerticalMm ?? prev.deslocamentoVerticalMm,
+      deslocamentoHorizontalMm: config.deslocamentoHorizontalMm ?? prev.deslocamentoHorizontalMm,
+      espacamentoColunasMm: config.espacamentoColunasMm ?? prev.espacamentoColunasMm,
+    };
+    localStorage.setItem(ZEBRA_CONFIG_STORAGE_KEY, JSON.stringify(toSave));
+  } catch (err) {
+    console.warn("Erro ao salvar preferências da Zebra:", err);
+  }
+}
+
+/**
+ * Restaura preferências para o padrão original da fábrica
+ */
+export function resetEtiquetaZebraPreferences(): void {
+  try {
+    localStorage.removeItem(ZEBRA_CONFIG_STORAGE_KEY);
+  } catch (err) {
+    console.warn("Erro ao redefinir preferências da Zebra:", err);
+  }
+}
+
 /**
  * Utilitário para deduzir campos da etiqueta a partir da OP ou Palete
- * Ajustado para o padrão visual real da fábrica Forpack (Foto 2)
+ * Mesclando com preferências persistidas no navegador do operador
  */
 export function inferEtiquetaZebraData(
   order: Order | null | undefined,
@@ -77,7 +141,6 @@ export function inferEtiquetaZebraData(
     tipoFilme = mat.toUpperCase();
     if (!tipoFilme.includes("FILME") && !tipoFilme.includes("SACO")) tipoFilme = `FILME ${tipoFilme}`;
   } else if (desc) {
-    // Pega as primeiras 3 palavras ou prefixo
     const words = desc.split(/\s+/);
     if (words.length >= 3 && /filme|saco|pebd|pead|pp/i.test(words[0])) {
       tipoFilme = words.slice(0, 3).join(" ").toUpperCase();
@@ -90,7 +153,6 @@ export function inferEtiquetaZebraData(
     aplicacao = order.cliente.replace(/^[pP]\/\s*/, "").trim().toUpperCase();
   }
 
-  // Se a descrição do item contiver algo após o tipo e antes das medidas
   let cleanedDesc = desc;
   if (dimMatch) {
     cleanedDesc = cleanedDesc.replace(dimMatch[0], "");
@@ -120,19 +182,25 @@ export function inferEtiquetaZebraData(
   const [year, month, day] = rawDate.split("-");
   const dataFormatada = year && month && day ? `${day}/${month}/${year}` : new Date().toLocaleDateString("pt-BR");
 
+  const saved = loadSavedEtiquetaZebraPreferences();
+
   return {
     tipoFilme: tipoFilme || "FILME PEBD IMP",
     aplicacao: aplicacao || "PIPOCA LYPE",
     medidas: medidas || "69X0,028",
     dataImpressao: dataFormatada,
-    tamanhoEtiqueta: "43x24", // 4,30 cm x 2,40 cm - Padrão Real da Fábrica Forpack
-    larguraMm: 43,
-    alturaMm: 24,
-    orientacao: "horizontal", // Padrão Horizontal
-    formatoRolo: "2_colunas", // Padrão: 2 Colunas (88 mm total)
-    duplicarPistas: true, // Padrão: Imprime idêntico nas 2 pistas como na Foto 2
-    imprimirPesos: true,
-    incluirIdentificacaoOp: false, // Padrão false para não poluir o layout compacto de 24mm
+    tamanhoEtiqueta: (saved.tamanhoEtiqueta as any) || "43x24",
+    larguraMm: saved.larguraMm || 43,
+    alturaMm: saved.alturaMm || 24,
+    orientacao: saved.orientacao || "horizontal",
+    formatoRolo: saved.formatoRolo || "2_colunas",
+    duplicarPistas: saved.duplicarPistas ?? true,
+    imprimirPesos: saved.imprimirPesos ?? true,
+    incluirIdentificacaoOp: saved.incluirIdentificacaoOp ?? false,
+    modoEnvioCss: saved.modoEnvioCss || "dimensoes_puras",
+    deslocamentoVerticalMm: saved.deslocamentoVerticalMm ?? 0,
+    deslocamentoHorizontalMm: saved.deslocamentoHorizontalMm ?? 0,
+    espacamentoColunasMm: saved.espacamentoColunasMm ?? 2,
     codigoOp: order?.numeroOp || order?.numeroPedido || palete?.numeroOp || "",
     numeroPalete: palete?.numeroPalete || "",
   };
@@ -167,24 +235,62 @@ export function printEtiquetasZebra(
   printDoc.open();
 
   // Dimensões em mm
-  const singleWidthMm = config.larguraMm || 43;
-  const singleHeightMm = config.alturaMm || 24;
+  const singleWidthMm = config.larguraMm || (config.tamanhoEtiqueta === "60x40" ? 60 : 43);
+  const singleHeightMm = config.alturaMm || (config.tamanhoEtiqueta === "60x40" ? 40 : 24);
   const is2Col = config.formatoRolo === "2_colunas";
+  const gapMm = config.espacamentoColunasMm ?? 2;
+  const offX = config.deslocamentoHorizontalMm ?? 0;
+  const offY = config.deslocamentoVerticalMm ?? 0;
 
   // Largura total da folha/rolo
-  const pageWidthMm = is2Col ? singleWidthMm * 2 + 2 : singleWidthMm;
+  const pageWidthMm = is2Col ? singleWidthMm * 2 + gapMm : singleWidthMm;
   const pageHeightMm = singleHeightMm;
+  const modoEnvio = config.modoEnvioCss || "dimensoes_puras";
 
   // Configuração precisa de tamanho de página e dimensões do body para evitar giros indesejados no Chrome
   const isRotated = config.orientacao === "rotacionada_90" || config.orientacao === "rotacionada_270";
-  const pageSizeCss = isRotated
-    ? `${pageHeightMm}mm ${pageWidthMm}mm portrait`
-    : config.orientacao === "vertical"
-    ? `${pageWidthMm}mm ${pageHeightMm}mm portrait`
-    : `${pageWidthMm}mm ${pageHeightMm}mm landscape`;
 
-  const bodyWidthMm = isRotated ? pageHeightMm : pageWidthMm;
-  const bodyHeightMm = isRotated ? pageWidthMm : pageHeightMm;
+  let pageSizeCss = `${pageWidthMm}mm ${pageHeightMm}mm`;
+  let bodyWidthMm = pageWidthMm;
+  let bodyHeightMm = pageHeightMm;
+
+  if (isRotated) {
+    if (modoEnvio === "forcar_retrato") {
+      pageSizeCss = `${pageHeightMm}mm ${pageWidthMm}mm portrait`;
+    } else if (modoEnvio === "forcar_paisagem") {
+      pageSizeCss = `${pageWidthMm}mm ${pageHeightMm}mm landscape`;
+    } else if (modoEnvio === "tamanho_invertido") {
+      pageSizeCss = `${pageHeightMm}mm ${pageWidthMm}mm`;
+    } else {
+      pageSizeCss = `${pageHeightMm}mm ${pageWidthMm}mm`;
+    }
+    bodyWidthMm = pageHeightMm;
+    bodyHeightMm = pageWidthMm;
+  } else if (config.orientacao === "vertical") {
+    if (modoEnvio === "forcar_retrato") {
+      pageSizeCss = `${pageWidthMm}mm ${pageHeightMm}mm portrait`;
+    } else if (modoEnvio === "tamanho_invertido") {
+      pageSizeCss = `${pageHeightMm}mm ${pageWidthMm}mm`;
+      bodyWidthMm = pageHeightMm;
+      bodyHeightMm = pageWidthMm;
+    } else {
+      pageSizeCss = `${pageWidthMm}mm ${pageHeightMm}mm`;
+    }
+  } else {
+    // horizontal ou invertida_180
+    if (modoEnvio === "forcar_paisagem") {
+      pageSizeCss = `${pageWidthMm}mm ${pageHeightMm}mm landscape`;
+    } else if (modoEnvio === "forcar_retrato") {
+      pageSizeCss = `${pageWidthMm}mm ${pageHeightMm}mm portrait`;
+    } else if (modoEnvio === "tamanho_invertido") {
+      pageSizeCss = `${pageHeightMm}mm ${pageWidthMm}mm`;
+      bodyWidthMm = pageHeightMm;
+      bodyHeightMm = pageWidthMm;
+    } else {
+      // Padrão Puro Milimétrico: Chrome respeita exatamente 88x24 sem girar!
+      pageSizeCss = `${pageWidthMm}mm ${pageHeightMm}mm`;
+    }
+  }
 
   // Lista base de itens
   const baseItens: EtiquetaBobinaItem[] =
@@ -247,10 +353,11 @@ export function printEtiquetasZebra(
 
   // Helper para encapsular o conteúdo de acordo com a rotação
   const wrapPageContent = (innerHtml: string) => {
+    const shiftCss = offX !== 0 || offY !== 0 ? `transform: translate(${offX}mm, ${offY}mm);` : "";
     if (config.orientacao === "rotacionada_270") {
       return `
       <div class="page-wrapper-rot270" style="width: ${pageHeightMm}mm; height: ${pageWidthMm}mm; position: relative; overflow: hidden; page-break-after: always; break-after: page;">
-        <div style="width: ${pageWidthMm}mm; height: ${pageHeightMm}mm; position: absolute; top: 0; left: 0; transform-origin: 0 0; transform: rotate(-90deg) translateX(-${pageWidthMm}mm); display: flex; flex-direction: row; align-items: center; justify-content: space-between;">
+        <div style="width: ${pageWidthMm}mm; height: ${pageHeightMm}mm; position: absolute; top: 0; left: 0; transform-origin: 0 0; transform: rotate(-90deg) translateX(-${pageWidthMm}mm) translate(${offX}mm, ${offY}mm); display: flex; flex-direction: row; align-items: center; justify-content: space-between;">
           ${innerHtml}
         </div>
       </div>`;
@@ -258,19 +365,19 @@ export function printEtiquetasZebra(
     if (config.orientacao === "rotacionada_90") {
       return `
       <div class="page-wrapper-rot90" style="width: ${pageHeightMm}mm; height: ${pageWidthMm}mm; position: relative; overflow: hidden; page-break-after: always; break-after: page;">
-        <div style="width: ${pageWidthMm}mm; height: ${pageHeightMm}mm; position: absolute; top: 0; left: 0; transform-origin: 0 0; transform: rotate(90deg) translateY(-${pageHeightMm}mm); display: flex; flex-direction: row; align-items: center; justify-content: space-between;">
+        <div style="width: ${pageWidthMm}mm; height: ${pageHeightMm}mm; position: absolute; top: 0; left: 0; transform-origin: 0 0; transform: rotate(90deg) translateY(-${pageHeightMm}mm) translate(${offX}mm, ${offY}mm); display: flex; flex-direction: row; align-items: center; justify-content: space-between;">
           ${innerHtml}
         </div>
       </div>`;
     }
     if (config.orientacao === "invertida_180") {
       return `
-      <div class="page-wrapper-inv180" style="width: ${pageWidthMm}mm; height: ${pageHeightMm}mm; overflow: hidden; page-break-after: always; break-after: page; transform: rotate(180deg); transform-origin: center center; display: flex; flex-direction: row; align-items: center; justify-content: space-between;">
+      <div class="page-wrapper-inv180" style="width: ${pageWidthMm}mm; height: ${pageHeightMm}mm; overflow: hidden; page-break-after: always; break-after: page; transform: rotate(180deg) translate(${offX}mm, ${offY}mm); transform-origin: center center; display: flex; flex-direction: row; align-items: center; justify-content: space-between;">
         ${innerHtml}
       </div>`;
     }
     return `
-    <div class="etiqueta-page-row" style="width: ${pageWidthMm}mm; height: ${pageHeightMm}mm; display: flex; flex-direction: row; align-items: center; justify-content: space-between; page-break-after: always; break-after: page; overflow: hidden;">
+    <div class="etiqueta-page-row" style="width: ${pageWidthMm}mm; height: ${pageHeightMm}mm; display: flex; flex-direction: row; align-items: center; justify-content: space-between; page-break-after: always; break-after: page; overflow: hidden; ${shiftCss}">
       ${innerHtml}
     </div>`;
   };
@@ -296,7 +403,7 @@ export function printEtiquetasZebra(
         ([item1, item2]) =>
           wrapPageContent(`
             ${renderCardHtml(item1)}
-            <div class="col-gap" style="width: 2mm;"></div>
+            <div class="col-gap" style="width: ${gapMm}mm;"></div>
             ${renderCardHtml(item2)}
           `)
       )
@@ -624,6 +731,7 @@ export function EtiquetaZebraModal({
   const [config, setConfig] = useState<EtiquetaZebraData>(() =>
     inferEtiquetaZebraData(order, palete)
   );
+  const [savedNotice, setSavedNotice] = useState(false);
 
   // Tab mode
   const [tab, setTab] = useState<"preview" | "lote" | "guia" | "zpl">("preview");
@@ -648,6 +756,24 @@ export function EtiquetaZebraModal({
       }
     }
   }, [isOpen, order, palete, singleBobina, allBobinas.length]);
+
+  // Atualização com salvamento automático persistente no navegador
+  const updateConfig = (patch: Partial<EtiquetaZebraData>) => {
+    setConfig((prev) => {
+      const next = { ...prev, ...patch };
+      saveEtiquetaZebraPreferences(next);
+      return next;
+    });
+    setSavedNotice(true);
+    setTimeout(() => setSavedNotice(false), 2200);
+  };
+
+  const handleResetToDefaults = () => {
+    resetEtiquetaZebraPreferences();
+    setConfig(inferEtiquetaZebraData(order, palete));
+    setSavedNotice(true);
+    setTimeout(() => setSavedNotice(false), 2200);
+  };
 
   // Items to print based on selected scope
   const targetItens = useMemo<EtiquetaBobinaItem[]>(() => {
@@ -711,6 +837,20 @@ export function EtiquetaZebraModal({
     setTimeout(() => setCopiedZpl(false), 2500);
   };
 
+  // Preview card transform style based on selected orientation
+  const previewRotationStyle = useMemo(() => {
+    if (config.orientacao === "rotacionada_270") {
+      return { transform: "rotate(-90deg) scale(0.92)", transition: "transform 0.2s ease" };
+    }
+    if (config.orientacao === "rotacionada_90") {
+      return { transform: "rotate(90deg) scale(0.92)", transition: "transform 0.2s ease" };
+    }
+    if (config.orientacao === "invertida_180") {
+      return { transform: "rotate(180deg)", transition: "transform 0.2s ease" };
+    }
+    return { transform: "none", transition: "transform 0.2s ease" };
+  }, [config.orientacao]);
+
   if (!isOpen) return null;
 
   return (
@@ -729,7 +869,7 @@ export function EtiquetaZebraModal({
               <Tag className="w-5 h-5" />
             </div>
             <div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <span className="text-[10px] font-bold uppercase tracking-wider text-blue-400">
                   IMPRESSORA TÉRMICA ZEBRA
                 </span>
@@ -738,7 +878,13 @@ export function EtiquetaZebraModal({
                 </span>
                 {config.formatoRolo === "2_colunas" && (
                   <span className="text-[9px] font-mono bg-amber-500/20 text-amber-300 px-1.5 py-0.2 rounded border border-amber-400/30 font-bold">
-                    2 Colunas (Pistas Duplas)
+                    2 Colunas (88 mm total)
+                  </span>
+                )}
+                {savedNotice && (
+                  <span className="text-[9px] font-bold bg-emerald-500/30 text-emerald-300 px-1.5 py-0.2 rounded border border-emerald-400/40 flex items-center gap-1 animate-pulse">
+                    <Check className="w-2.5 h-2.5" />
+                    <span>Salvo no Navegador</span>
                   </span>
                 )}
               </div>
@@ -767,8 +913,8 @@ export function EtiquetaZebraModal({
                 : "border-transparent text-slate-500 hover:text-slate-800"
             }`}
           >
-            <Eye className="w-3.5 h-3.5" />
-            <span>Visualização & Ajustes</span>
+            <Compass className="w-3.5 h-3.5 text-blue-600" />
+            <span className="font-bold">Sentido & Alinhamento</span>
           </button>
           <button
             type="button"
@@ -812,54 +958,75 @@ export function EtiquetaZebraModal({
         <div className="p-5 overflow-y-auto space-y-4 flex-1">
           {tab === "preview" && (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-5 items-start">
-              {/* CARTÃO VISUAL REALISTA DA ETIQUETA ADESIVA ZEBRA (Fiel à Foto 2 da fábrica Forpack) */}
+              {/* COLUNA ESQUERDA: SIMULADOR REAL DO ROLO TÉRMICO COM SENTIDO DE SAÍDA */}
               <div className="flex flex-col items-center">
                 <div className="flex items-center justify-between w-full mb-1.5 px-1">
-                  <span className="text-[11px] font-bold text-slate-700 uppercase tracking-wide">
-                    Pré-visualização Térmica (Foto 2)
+                  <span className="text-[11px] font-bold text-slate-700 uppercase tracking-wide flex items-center gap-1.5">
+                    <Compass className="w-3.5 h-3.5 text-blue-600" />
+                    <span>Sentido Físico no Rolo</span>
                   </span>
                   <span className="text-[10px] font-mono font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
-                    2 Pistas (88 x 24 mm) · {config.orientacao === "rotacionada_90" ? "Giro +90°" : config.orientacao === "rotacionada_270" ? "Giro -90°" : config.orientacao === "invertida_180" ? "Giro 180°" : "Horizontal 0°"}
+                    {config.orientacao === "rotacionada_270"
+                      ? "Giro -90° (Compensado)"
+                      : config.orientacao === "rotacionada_90"
+                      ? "Giro +90°"
+                      : config.orientacao === "invertida_180"
+                      ? "Invertido 180°"
+                      : "Horizontal 0°"}
                   </span>
                 </div>
 
-                <div className="p-3.5 bg-slate-200 rounded-xl border border-slate-300 shadow-inner flex flex-col items-center justify-center w-full gap-2">
-                  {/* SIMULAÇÃO DO ROLO COM 2 PISTAS LADO A LADO (EXATAMENTE COMO NA FOTO 2) */}
-                  <div className="flex items-center justify-center gap-2 overflow-x-auto max-w-full p-1">
+                {/* SIMULADOR DO ROLO DE ETIQUETAS */}
+                <div className="p-3.5 bg-slate-800 rounded-xl border border-slate-700 shadow-inner flex flex-col items-center justify-center w-full gap-2 text-white">
+                  {/* CABEÇOTE DA IMPRESSORA / INDICADOR DE SAÍDA */}
+                  <div className="w-full bg-slate-900 border border-slate-700 rounded-lg py-1 px-2.5 flex items-center justify-between text-[10px] text-amber-300 font-bold uppercase tracking-wider">
+                    <span className="flex items-center gap-1">
+                      <Printer className="w-3.5 h-3.5 text-amber-400" />
+                      <span>Cabeçote Térmico Zebra</span>
+                    </span>
+                    <span className="flex items-center gap-1 text-[9px] text-amber-200">
+                      <span>Saída do Papel</span>
+                      <ArrowDown className="w-3 h-3 text-amber-400 animate-bounce" />
+                    </span>
+                  </div>
+
+                  {/* SIMULAÇÃO DO PAPEL SILICONE COM 2 PISTAS LADO A LADO */}
+                  <div className="bg-amber-100/90 rounded-md p-2 border border-amber-300 shadow-md w-full flex items-center justify-center gap-2 overflow-x-auto min-h-[145px]">
                     {/* PISTA 1 (ESQUERDA) */}
                     <div
                       className="bg-white text-slate-900 border border-slate-400 rounded-[5px] p-2 shadow-md flex flex-col justify-between text-center select-none shrink-0"
                       style={{
-                        width: "185px",
-                        height: "115px",
+                        width: "165px",
+                        height: "105px",
                         fontFamily: "Arial, Helvetica, sans-serif",
+                        ...previewRotationStyle,
                       }}
                     >
                       <div>
                         {/* LINHA 1: FILME PEBD IMP */}
-                        <div className="font-black text-[10.5px] tracking-wide uppercase leading-tight truncate">
+                        <div className="font-black text-[9.5px] tracking-wide uppercase leading-tight truncate">
                           {config.tipoFilme || "FILME PEBD IMP"}
                         </div>
                         {/* LINHA 2: PIPOCA LYPE */}
-                        <div className="font-bold text-[9.5px] tracking-tight uppercase leading-tight mt-0.5 truncate text-slate-800">
+                        <div className="font-bold text-[8.5px] tracking-tight uppercase leading-tight mt-0.5 truncate text-slate-800">
                           {config.aplicacao || "PIPOCA LYPE"}
                         </div>
                         {/* LINHA 3: 69X0,028 */}
-                        <div className="font-black text-[11.5px] tracking-wider leading-tight mt-0.5">
+                        <div className="font-black text-[10.5px] tracking-wider leading-tight mt-0.5">
                           {config.medidas || "69X0,028"}
                         </div>
                       </div>
 
                       {/* LINHA 4: PESO B: ... L: ... */}
-                      <div className="font-bold text-[9px] tracking-wide my-0.5 flex items-center justify-start gap-1 px-1">
+                      <div className="font-bold text-[8.5px] tracking-wide my-0.5 flex items-center justify-start gap-1 px-0.5">
                         <span className="font-black">PESO B:</span>
-                        <span className="font-bold font-mono text-[9.5px] min-w-[32px] text-left">
+                        <span className="font-bold font-mono text-[8.5px] min-w-[28px] text-left">
                           {config.imprimirPesos && previewBobina.pesoBruto > 0
                             ? previewBobina.pesoBruto.toFixed(1)
                             : ""}
                         </span>
                         <span className="font-black ml-1">L:</span>
-                        <span className="font-bold font-mono text-[9.5px] min-w-[32px] text-left">
+                        <span className="font-bold font-mono text-[8.5px] min-w-[28px] text-left">
                           {config.imprimirPesos && previewBobina.pesoLiquido > 0
                             ? previewBobina.pesoLiquido.toFixed(1)
                             : ""}
@@ -868,58 +1035,59 @@ export function EtiquetaZebraModal({
 
                       {/* LINHA 5: DATA E FORPACK */}
                       <div>
-                        <div className="flex items-center justify-between pt-0.5 border-t border-slate-200 px-1">
-                          <span className="font-bold text-[8px] text-slate-800">
+                        <div className="flex items-center justify-between pt-0.5 border-t border-slate-200 px-0.5">
+                          <span className="font-bold text-[7.5px] text-slate-800">
                             DATA: {config.dataImpressao}
                           </span>
                           <div className="flex items-center gap-1">
-                            <span className="w-3 h-3 bg-black text-white rounded-full flex items-center justify-center font-bold font-serif text-[7px] leading-none pb-0.5">
+                            <span className="w-2.5 h-2.5 bg-black text-white rounded-full flex items-center justify-center font-bold font-serif text-[6px] leading-none pb-0.5">
                               f
                             </span>
-                            <span className="font-black text-[8.5px] tracking-tight text-slate-900">
+                            <span className="font-black text-[7.5px] tracking-tight text-slate-900">
                               Forpack
                             </span>
                           </div>
                         </div>
                         {config.incluirIdentificacaoOp && (
-                          <div className="text-[6.5px] text-slate-500 font-mono tracking-tighter mt-0.5 truncate">
+                          <div className="text-[6px] text-slate-500 font-mono tracking-tighter mt-0.5 truncate">
                             OP #{config.codigoOp || "—"} · {previewBobina.codigoBobina || `BOB #${previewBobina.posicao}`}
                           </div>
                         )}
                       </div>
                     </div>
 
-                    {/* PISTA 2 (DIREITA) - SELECIONADO 2 COLUNAS */}
+                    {/* PISTA 2 (DIREITA) */}
                     {config.formatoRolo === "2_colunas" && (
                       <div
                         className="bg-white text-slate-900 border border-slate-400 rounded-[5px] p-2 shadow-md flex flex-col justify-between text-center select-none shrink-0"
                         style={{
-                          width: "185px",
-                          height: "115px",
+                          width: "165px",
+                          height: "105px",
                           fontFamily: "Arial, Helvetica, sans-serif",
+                          ...previewRotationStyle,
                         }}
                       >
                         <div>
-                          <div className="font-black text-[10.5px] tracking-wide uppercase leading-tight truncate">
+                          <div className="font-black text-[9.5px] tracking-wide uppercase leading-tight truncate">
                             {config.tipoFilme || "FILME PEBD IMP"}
                           </div>
-                          <div className="font-bold text-[9.5px] tracking-tight uppercase leading-tight mt-0.5 truncate text-slate-800">
+                          <div className="font-bold text-[8.5px] tracking-tight uppercase leading-tight mt-0.5 truncate text-slate-800">
                             {config.aplicacao || "PIPOCA LYPE"}
                           </div>
-                          <div className="font-black text-[11.5px] tracking-wider leading-tight mt-0.5">
+                          <div className="font-black text-[10.5px] tracking-wider leading-tight mt-0.5">
                             {config.medidas || "69X0,028"}
                           </div>
                         </div>
 
-                        <div className="font-bold text-[9px] tracking-wide my-0.5 flex items-center justify-start gap-1 px-1">
+                        <div className="font-bold text-[8.5px] tracking-wide my-0.5 flex items-center justify-start gap-1 px-0.5">
                           <span className="font-black">PESO B:</span>
-                          <span className="font-bold font-mono text-[9.5px] min-w-[32px] text-left">
+                          <span className="font-bold font-mono text-[8.5px] min-w-[28px] text-left">
                             {config.imprimirPesos && (config.duplicarPistas ? previewBobina.pesoBruto : (allBobinas[1]?.pesoBruto || 0)) > 0
                               ? (config.duplicarPistas ? previewBobina.pesoBruto : allBobinas[1]!.pesoBruto).toFixed(1)
                               : ""}
                           </span>
                           <span className="font-black ml-1">L:</span>
-                          <span className="font-bold font-mono text-[9.5px] min-w-[32px] text-left">
+                          <span className="font-bold font-mono text-[8.5px] min-w-[28px] text-left">
                             {config.imprimirPesos && (config.duplicarPistas ? previewBobina.pesoLiquido : (allBobinas[1]?.pesoLiquido || 0)) > 0
                               ? (config.duplicarPistas ? previewBobina.pesoLiquido : allBobinas[1]!.pesoLiquido).toFixed(1)
                               : ""}
@@ -927,21 +1095,21 @@ export function EtiquetaZebraModal({
                         </div>
 
                         <div>
-                          <div className="flex items-center justify-between pt-0.5 border-t border-slate-200 px-1">
-                            <span className="font-bold text-[8px] text-slate-800">
+                          <div className="flex items-center justify-between pt-0.5 border-t border-slate-200 px-0.5">
+                            <span className="font-bold text-[7.5px] text-slate-800">
                               DATA: {config.dataImpressao}
                             </span>
                             <div className="flex items-center gap-1">
-                              <span className="w-3 h-3 bg-black text-white rounded-full flex items-center justify-center font-bold font-serif text-[7px] leading-none pb-0.5">
+                              <span className="w-2.5 h-2.5 bg-black text-white rounded-full flex items-center justify-center font-bold font-serif text-[6px] leading-none pb-0.5">
                                 f
                               </span>
-                              <span className="font-black text-[8.5px] tracking-tight text-slate-900">
+                              <span className="font-black text-[7.5px] tracking-tight text-slate-900">
                                 Forpack
                               </span>
                             </div>
                           </div>
                           {config.incluirIdentificacaoOp && (
-                            <div className="text-[6.5px] text-slate-500 font-mono tracking-tighter mt-0.5 truncate">
+                            <div className="text-[6px] text-slate-500 font-mono tracking-tighter mt-0.5 truncate">
                               OP #{config.codigoOp || "—"} · {config.duplicarPistas ? (previewBobina.codigoBobina || `BOB #${previewBobina.posicao}`) : (allBobinas[1]?.codigoBobina || "BOB #02")}
                             </div>
                           )}
@@ -949,303 +1117,408 @@ export function EtiquetaZebraModal({
                       </div>
                     )}
                   </div>
+
+                  {/* LEGENDA DO AVANÇO */}
+                  <div className="w-full flex items-center justify-between text-[10px] text-slate-400 px-1 pt-0.5">
+                    <span>Largura do rolo: <strong>88 mm (Pistas duplas)</strong></span>
+                    <span>Avanço: <strong>24 mm por etiqueta</strong></span>
+                  </div>
                 </div>
 
-                {/* PAINEL DE ALINHAMENTO E CORREÇÃO DE GIRO (SOLUÇÃO DA FOTO 1) */}
-                <div className="mt-3 p-3 bg-amber-50/90 border border-amber-300 rounded-xl text-xs text-amber-950 w-full space-y-2.5 shadow-xs">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex items-start gap-2">
-                      <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-                      <div>
-                        <strong className="block font-bold text-amber-950">
-                          Ajuste de Alinhamento da Zebra:
-                        </strong>
-                        <span className="text-[11px] text-amber-900 leading-tight block">
-                          Se o texto sair de lado (cortando as etiquetas na vertical como na Foto 1), selecione <strong>Girar -90°</strong> ou confira o guia do driver.
-                        </span>
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setTab("guia")}
-                      className="text-[10px] font-bold text-blue-700 hover:text-blue-900 bg-white px-2 py-1 rounded border border-blue-300 shrink-0 flex items-center gap-1 shadow-2xs hover:bg-blue-50 cursor-pointer"
-                    >
-                      <HelpCircle className="w-3 h-3 text-blue-600" />
-                      <span>Ver Guia da Zebra</span>
-                    </button>
-                  </div>
-
-                  {/* 4 MODOS DE GIRO RÁPIDO */}
-                  <div className="grid grid-cols-2 gap-1.5 pt-0.5">
-                    <button
-                      type="button"
-                      onClick={() => setConfig({ ...config, orientacao: "horizontal" })}
-                      className={`p-1.5 rounded-lg text-left transition cursor-pointer border ${
-                        config.orientacao === "horizontal"
-                          ? "bg-blue-600 text-white border-blue-700 font-bold shadow-2xs"
-                          : "bg-white border-slate-200 text-slate-700 hover:bg-slate-50"
-                      }`}
-                    >
-                      <div className="text-[11px] leading-tight">1. Horizontal (0°)</div>
-                      <div className={`text-[9px] ${config.orientacao === "horizontal" ? "text-blue-100" : "text-slate-400"}`}>
-                        Padrão Foto 2 (Paisagem)
-                      </div>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setConfig({ ...config, orientacao: "rotacionada_270" })}
-                      className={`p-1.5 rounded-lg text-left transition cursor-pointer border ${
-                        config.orientacao === "rotacionada_270"
-                          ? "bg-amber-600 text-white border-amber-700 font-bold shadow-2xs ring-1 ring-amber-400"
-                          : "bg-white border-amber-300 text-amber-950 hover:bg-amber-100/50"
-                      }`}
-                    >
-                      <div className="text-[11px] leading-tight font-bold flex items-center gap-1">
-                        <RotateCcw className="w-3 h-3" />
-                        <span>2. Girar -90° (Compensar)</span>
-                      </div>
-                      <div className={`text-[9px] ${config.orientacao === "rotacionada_270" ? "text-amber-100" : "text-amber-700"}`}>
-                        Corrige se sair de lado (Foto 1)
-                      </div>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setConfig({ ...config, orientacao: "vertical" })}
-                      className={`p-1.5 rounded-lg text-left transition cursor-pointer border ${
-                        config.orientacao === "vertical"
-                          ? "bg-blue-600 text-white border-blue-700 font-bold shadow-2xs"
-                          : "bg-white border-slate-200 text-slate-700 hover:bg-slate-50"
-                      }`}
-                    >
-                      <div className="text-[11px] leading-tight">3. Retrato (Vertical)</div>
-                      <div className={`text-[9px] ${config.orientacao === "vertical" ? "text-blue-100" : "text-slate-400"}`}>
-                        Para driver em Retrato
-                      </div>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setConfig({ ...config, orientacao: "invertida_180" })}
-                      className={`p-1.5 rounded-lg text-left transition cursor-pointer border ${
-                        config.orientacao === "invertida_180"
-                          ? "bg-blue-600 text-white border-blue-700 font-bold shadow-2xs"
-                          : "bg-white border-slate-200 text-slate-700 hover:bg-slate-50"
-                      }`}
-                    >
-                      <div className="text-[11px] leading-tight">4. Inverter 180°</div>
-                      <div className={`text-[9px] ${config.orientacao === "invertida_180" ? "text-blue-100" : "text-slate-400"}`}>
-                        De ponta-cabeça
-                      </div>
-                    </button>
-                  </div>
-
-                  {/* BOTÃO DE TESTE RÁPIDO */}
-                  <div className="pt-1 flex items-center justify-between border-t border-amber-200/80">
-                    <span className="text-[10px] text-amber-900">
-                      Modo selecionado: <strong>{config.orientacao === "rotacionada_270" ? "Giro -90° (Compensação de Driver Ativa)" : config.orientacao === "horizontal" ? "Horizontal 0° (Normal)" : config.orientacao === "vertical" ? "Retrato" : "Invertido 180°"}</strong>
+                {/* BOTÃO RÁPIDO PARA TESTAR NA IMPRESSORA FÍSICA */}
+                <div className="mt-3 w-full flex items-center justify-between gap-2 p-2.5 bg-emerald-50 border border-emerald-300 rounded-xl">
+                  <div className="text-left">
+                    <span className="text-[11px] font-bold text-emerald-950 block">
+                      Validação Imediata na Zebra:
                     </span>
-                    <button
-                      type="button"
-                      onClick={handlePrintTest}
-                      className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-md text-[11px] flex items-center gap-1.5 shadow-2xs transition cursor-pointer active:scale-95"
-                    >
-                      <Printer className="w-3 h-3" />
-                      <span>Testar 1 Par Agora</span>
-                    </button>
+                    <span className="text-[10px] text-emerald-800 block">
+                      Imprime apenas 1 avanço para confirmar o sentido físico.
+                    </span>
                   </div>
+                  <button
+                    type="button"
+                    onClick={handlePrintTest}
+                    className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg text-xs flex items-center gap-1.5 shadow-sm transition cursor-pointer active:scale-95 shrink-0"
+                  >
+                    <Printer className="w-3.5 h-3.5" />
+                    <span>Testar 1 Par Agora</span>
+                  </button>
                 </div>
               </div>
 
-              {/* FORMULÁRIO DE AJUSTES RÁPIDOS DA ETIQUETA */}
-              <div className="space-y-3 bg-slate-50 p-3.5 rounded-xl border border-slate-200 text-xs">
-                <div className="flex items-center justify-between">
-                  <span className="font-bold text-slate-700 uppercase tracking-wide text-[10px]">
-                    Campos & Configuração da Impressão
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setConfig(inferEtiquetaZebraData(order, palete))}
-                    className="text-[10px] text-blue-600 hover:underline flex items-center gap-1 cursor-pointer"
-                  >
-                    <RotateCcw className="w-3 h-3" />
-                    <span>Redefinir da OP</span>
-                  </button>
-                </div>
-
-                {/* Tamanho da etiqueta térmica */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  <div>
-                    <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                      Tamanho da Etiqueta
-                    </label>
-                    <select
-                      value={config.tamanhoEtiqueta}
-                      onChange={(e) => setConfig({ ...config, tamanhoEtiqueta: e.target.value as any })}
-                      className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-md text-xs font-bold text-blue-900 focus:ring-1 focus:ring-blue-500"
+              {/* COLUNA DIREITA: SELEÇÃO DE SENTIDO & ASSISTENTE INTELIGENTE DE RESOLUÇÃO */}
+              <div className="space-y-3.5 text-xs">
+                {/* 1. SELETOR DE SENTIDO / ORIENTAÇÃO */}
+                <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-200 space-y-2.5 shadow-2xs">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-slate-800 uppercase tracking-wide text-[10.5px] flex items-center gap-1.5">
+                      <Compass className="w-4 h-4 text-blue-600" />
+                      <span>Sentido da Impressão (Orientação)</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleResetToDefaults}
+                      className="text-[10px] text-blue-600 hover:underline flex items-center gap-1 cursor-pointer"
+                      title="Restaura os padrões de fábrica"
                     >
-                      <option value="43x24">4,30 x 2,40 cm (Padrão Fábrica Forpack)</option>
-                      <option value="60x40">60 mm x 40 mm (Médio)</option>
-                      <option value="70x50">70 mm x 50 mm</option>
-                      <option value="100x50">100 mm x 50 mm (Largo)</option>
-                    </select>
+                      <RotateCcw className="w-3 h-3" />
+                      <span>Restaurar Padrão</span>
+                    </button>
                   </div>
 
-                  <div>
-                    <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                      Orientação
-                    </label>
-                    <select
-                      value={config.orientacao}
-                      onChange={(e) => setConfig({ ...config, orientacao: e.target.value as any })}
-                      className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-md text-xs font-semibold text-slate-800"
-                    >
-                      <option value="horizontal">Horizontal (0° - Padrão Foto 2)</option>
-                      <option value="rotacionada_270">Girar -90° (Anti-horário - Neutraliza giro)</option>
-                      <option value="rotacionada_90">Girar +90° (Horário)</option>
-                      <option value="invertida_180">Inverter 180°</option>
-                    </select>
-                  </div>
-                </div>
+                  <p className="text-[11px] text-slate-600 leading-tight">
+                    Escolha a direção em que o texto é enviado para a impressora. Se a sua etiqueta estiver saindo de lado, selecione o <strong>Modo 2</strong>:
+                  </p>
 
-                {/* Formato do Rolo (1 coluna vs 2 colunas / pistas duplas) */}
-                <div>
-                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                    Disposição no Rolo de Etiquetas
-                  </label>
+                  {/* 4 BOTÕES DE SENTIDO ILUSTRADOS */}
                   <div className="grid grid-cols-2 gap-2">
+                    {/* MODO 1: HORIZONTAL 0° */}
                     <button
                       type="button"
-                      onClick={() => setConfig({ ...config, formatoRolo: "2_colunas" })}
-                      className={`p-2 rounded-lg border text-left cursor-pointer transition ${
-                        config.formatoRolo === "2_colunas"
-                          ? "bg-blue-50 border-blue-600 text-blue-900 ring-1 ring-blue-500"
-                          : "bg-white border-slate-300 text-slate-700 hover:bg-slate-100"
+                      onClick={() => updateConfig({ orientacao: "horizontal", modoEnvioCss: "dimensoes_puras" })}
+                      className={`p-2 rounded-xl text-left transition cursor-pointer border ${
+                        config.orientacao === "horizontal"
+                          ? "bg-blue-600 text-white border-blue-700 font-bold shadow-xs ring-2 ring-blue-400/30"
+                          : "bg-white border-slate-200 text-slate-700 hover:bg-slate-100"
                       }`}
                     >
-                      <strong className="block text-xs">2 Colunas (88 mm)</strong>
-                      <span className="text-[10px] text-slate-500">Pistas duplas (Padrão Forpack)</span>
+                      <div className="flex items-center justify-between mb-0.5">
+                        <span className="text-xs font-bold">1. Horizontal (0°)</span>
+                        <ArrowRight className={`w-3.5 h-3.5 ${config.orientacao === "horizontal" ? "text-white" : "text-slate-400"}`} />
+                      </div>
+                      <span className={`text-[10px] block ${config.orientacao === "horizontal" ? "text-blue-100" : "text-slate-500"}`}>
+                        Texto no sentido da largura do rolo (88x24 mm)
+                      </span>
                     </button>
 
+                    {/* MODO 2: GIRAR -90° (COMPENSAR GIRO ZEBRA/CHROME) */}
                     <button
                       type="button"
-                      onClick={() => setConfig({ ...config, formatoRolo: "1_coluna" })}
-                      className={`p-2 rounded-lg border text-left cursor-pointer transition ${
-                        config.formatoRolo === "1_coluna"
-                          ? "bg-blue-50 border-blue-600 text-blue-900 ring-1 ring-blue-500"
-                          : "bg-white border-slate-300 text-slate-700 hover:bg-slate-100"
+                      onClick={() => updateConfig({ orientacao: "rotacionada_270", modoEnvioCss: "dimensoes_puras" })}
+                      className={`p-2 rounded-xl text-left transition cursor-pointer border ${
+                        config.orientacao === "rotacionada_270"
+                          ? "bg-amber-600 text-white border-amber-700 font-bold shadow-xs ring-2 ring-amber-400/50"
+                          : "bg-amber-50/70 border-amber-300 text-amber-950 hover:bg-amber-100/70"
                       }`}
                     >
-                      <strong className="block text-xs">1 Coluna (43 mm)</strong>
-                      <span className="text-[10px] text-slate-500">1 etiqueta por avanço</span>
+                      <div className="flex items-center justify-between mb-0.5">
+                        <span className="text-xs font-bold flex items-center gap-1">
+                          <RotateCcw className="w-3.5 h-3.5" />
+                          <span>2. Girar -90° (Compensar)</span>
+                        </span>
+                        <span className="text-[8px] uppercase tracking-wider bg-amber-200 text-amber-900 px-1 py-0.2 rounded font-black">
+                          Solução
+                        </span>
+                      </div>
+                      <span className={`text-[10px] block ${config.orientacao === "rotacionada_270" ? "text-amber-100" : "text-amber-800"}`}>
+                        Corrige se sair de lado cortando na vertical (Foto 1)
+                      </span>
+                    </button>
+
+                    {/* MODO 3: GIRAR +90° */}
+                    <button
+                      type="button"
+                      onClick={() => updateConfig({ orientacao: "rotacionada_90", modoEnvioCss: "dimensoes_puras" })}
+                      className={`p-2 rounded-xl text-left transition cursor-pointer border ${
+                        config.orientacao === "rotacionada_90"
+                          ? "bg-blue-600 text-white border-blue-700 font-bold shadow-xs ring-2 ring-blue-400/30"
+                          : "bg-white border-slate-200 text-slate-700 hover:bg-slate-100"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between mb-0.5">
+                        <span className="text-xs font-bold flex items-center gap-1">
+                          <RotateCw className="w-3.5 h-3.5" />
+                          <span>3. Girar +90°</span>
+                        </span>
+                      </div>
+                      <span className={`text-[10px] block ${config.orientacao === "rotacionada_90" ? "text-blue-100" : "text-slate-500"}`}>
+                        Sentido horário ao longo do avanço
+                      </span>
+                    </button>
+
+                    {/* MODO 4: INVERTER 180° */}
+                    <button
+                      type="button"
+                      onClick={() => updateConfig({ orientacao: "invertida_180", modoEnvioCss: "dimensoes_puras" })}
+                      className={`p-2 rounded-xl text-left transition cursor-pointer border ${
+                        config.orientacao === "invertida_180"
+                          ? "bg-blue-600 text-white border-blue-700 font-bold shadow-xs ring-2 ring-blue-400/30"
+                          : "bg-white border-slate-200 text-slate-700 hover:bg-slate-100"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between mb-0.5">
+                        <span className="text-xs font-bold flex items-center gap-1">
+                          <RefreshCw className="w-3.5 h-3.5" />
+                          <span>4. Inverter 180°</span>
+                        </span>
+                      </div>
+                      <span className={`text-[10px] block ${config.orientacao === "invertida_180" ? "text-blue-100" : "text-slate-500"}`}>
+                        De ponta-cabeça (inverte direção de leitura)
+                      </span>
                     </button>
                   </div>
                 </div>
 
-                {/* Toggle de duplicação nas duas pistas */}
-                {config.formatoRolo === "2_colunas" && (
-                  <div className="p-2.5 bg-blue-50/60 border border-blue-200 rounded-lg">
-                    <label className="flex items-center gap-2 cursor-pointer">
+                {/* 2. ASSISTENTE RÁPIDO DE DIAGNÓSTICO EM 1 CLIQUE */}
+                <div className="bg-blue-50/80 border border-blue-200 rounded-xl p-3 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="w-4 h-4 text-blue-600 shrink-0" />
+                    <span className="font-bold text-xs text-blue-950">
+                      Assistente de Resolução em 1 Clique:
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-blue-900 leading-snug">
+                    Como a etiqueta saiu impressa no papel físico da sua máquina Zebra?
+                  </p>
+
+                  <div className="space-y-1.5 pt-0.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        updateConfig({ orientacao: "rotacionada_270", modoEnvioCss: "dimensoes_puras" });
+                        handlePrintTest();
+                      }}
+                      className="w-full p-2 bg-white hover:bg-amber-50 border border-amber-300 rounded-lg text-left flex items-center justify-between transition cursor-pointer group shadow-2xs"
+                    >
+                      <div>
+                        <strong className="text-[11px] text-amber-950 block group-hover:text-amber-800">
+                          👉 "O texto saiu em pé / deitado cortando as laterais"
+                        </strong>
+                        <span className="text-[10px] text-slate-600 block">
+                          Aplica compensação de -90° e dispara teste imediatamente
+                        </span>
+                      </div>
+                      <span className="text-[10px] font-bold text-amber-700 bg-amber-100 px-2 py-1 rounded shrink-0">
+                        Corrigir Agora
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        updateConfig({ orientacao: "invertida_180" });
+                        handlePrintTest();
+                      }}
+                      className="w-full p-2 bg-white hover:bg-blue-100/60 border border-blue-200 rounded-lg text-left flex items-center justify-between transition cursor-pointer group shadow-2xs"
+                    >
+                      <div>
+                        <strong className="text-[11px] text-blue-950 block group-hover:text-blue-800">
+                          👉 "O texto saiu de cabeça para baixo"
+                        </strong>
+                        <span className="text-[10px] text-slate-600 block">
+                          Gira 180° e dispara teste de validação
+                        </span>
+                      </div>
+                      <span className="text-[10px] font-bold text-blue-700 bg-blue-100 px-2 py-1 rounded shrink-0">
+                        Inverter
+                      </span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* 3. AJUSTES AVANÇADOS DE DRIVER & DESLOCAMENTO */}
+                <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-200 space-y-3">
+                  <span className="font-bold text-slate-800 uppercase tracking-wide text-[10.5px] block">
+                    Modo de Envio ao Driver & Calibração Fina (mm)
+                  </span>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {/* MODO DE ENVIO CSS */}
+                    <div>
+                      <label className="block text-[10.5px] font-semibold text-slate-700 mb-1">
+                        Modo CSS @page do Navegador
+                      </label>
+                      <select
+                        value={config.modoEnvioCss || "dimensoes_puras"}
+                        onChange={(e) => updateConfig({ modoEnvioCss: e.target.value as any })}
+                        className="w-full px-2 py-1.5 bg-white border border-slate-300 rounded-md text-[11px] font-semibold text-slate-800"
+                      >
+                        <option value="dimensoes_puras">Puro Milimétrico (88x24 mm - Sem Landscape)</option>
+                        <option value="forcar_paisagem">Forçar Paisagem no Chrome</option>
+                        <option value="forcar_retrato">Forçar Retrato no Chrome</option>
+                        <option value="tamanho_invertido">Inverter Largura/Altura (24x88 mm)</option>
+                      </select>
+                      <span className="text-[9.5px] text-slate-500 mt-0.5 block">
+                        O modo Puro Milimétrico impede o Chrome de rotacionar o rolo.
+                      </span>
+                    </div>
+
+                    {/* GAP ENTRE AS PISTAS */}
+                    <div>
+                      <label className="block text-[10.5px] font-semibold text-slate-700 mb-1">
+                        Espaçamento entre Pistas (Gap)
+                      </label>
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="number"
+                          min="0"
+                          max="8"
+                          step="0.5"
+                          value={config.espacamentoColunasMm ?? 2}
+                          onChange={(e) => updateConfig({ espacamentoColunasMm: parseFloat(e.target.value) || 0 })}
+                          className="w-20 px-2 py-1.5 bg-white border border-slate-300 rounded-md text-[11px] font-bold text-slate-900"
+                        />
+                        <span className="text-[11px] text-slate-600 font-semibold">mm</span>
+                        <span className="text-[9.5px] text-slate-400 ml-auto">Padrão Forpack: 2,0 mm</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* DESLOCAMENTOS VERTICAL E HORIZONTAL (OFFSET EM MM) */}
+                  <div className="pt-2 border-t border-slate-200 grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-[10.5px] font-semibold text-slate-700 mb-0.5">
+                        Deslocamento Vertical (+/- mm)
+                      </label>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => updateConfig({ deslocamentoVerticalMm: (config.deslocamentoVerticalMm ?? 0) - 1 })}
+                          className="px-2 py-1 bg-white hover:bg-slate-200 border border-slate-300 rounded text-xs font-bold cursor-pointer"
+                        >
+                          -1
+                        </button>
+                        <input
+                          type="number"
+                          step="0.5"
+                          value={config.deslocamentoVerticalMm ?? 0}
+                          onChange={(e) => updateConfig({ deslocamentoVerticalMm: parseFloat(e.target.value) || 0 })}
+                          className="w-14 px-1 py-1 bg-white border border-slate-300 rounded text-center text-xs font-bold"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => updateConfig({ deslocamentoVerticalMm: (config.deslocamentoVerticalMm ?? 0) + 1 })}
+                          className="px-2 py-1 bg-white hover:bg-slate-200 border border-slate-300 rounded text-xs font-bold cursor-pointer"
+                        >
+                          +1
+                        </button>
+                      </div>
+                      <span className="text-[9px] text-slate-500 block mt-0.5">Sobe ou desce o texto</span>
+                    </div>
+
+                    <div>
+                      <label className="block text-[10.5px] font-semibold text-slate-700 mb-0.5">
+                        Deslocamento Horizontal (+/- mm)
+                      </label>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => updateConfig({ deslocamentoHorizontalMm: (config.deslocamentoHorizontalMm ?? 0) - 1 })}
+                          className="px-2 py-1 bg-white hover:bg-slate-200 border border-slate-300 rounded text-xs font-bold cursor-pointer"
+                        >
+                          -1
+                        </button>
+                        <input
+                          type="number"
+                          step="0.5"
+                          value={config.deslocamentoHorizontalMm ?? 0}
+                          onChange={(e) => updateConfig({ deslocamentoHorizontalMm: parseFloat(e.target.value) || 0 })}
+                          className="w-14 px-1 py-1 bg-white border border-slate-300 rounded text-center text-xs font-bold"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => updateConfig({ deslocamentoHorizontalMm: (config.deslocamentoHorizontalMm ?? 0) + 1 })}
+                          className="px-2 py-1 bg-white hover:bg-slate-200 border border-slate-300 rounded text-xs font-bold cursor-pointer"
+                        >
+                          +1
+                        </button>
+                      </div>
+                      <span className="text-[9px] text-slate-500 block mt-0.5">Move para esquerda ou direita</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 4. CAMPOS DO CONTEÚDO DA ETIQUETA */}
+                <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-slate-700 uppercase tracking-wide text-[10px]">
+                      Dados Textuais da Bobina
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setConfig(inferEtiquetaZebraData(order, palete))}
+                      className="text-[10px] text-blue-600 hover:underline flex items-center gap-1 cursor-pointer"
+                    >
+                      <RotateCcw className="w-3 h-3" />
+                      <span>Atualizar da OP</span>
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-600 mb-0.5">
+                        Tipo de Filme (Linha 1)
+                      </label>
+                      <input
+                        type="text"
+                        value={config.tipoFilme}
+                        onChange={(e) => updateConfig({ tipoFilme: e.target.value.toUpperCase() })}
+                        className="w-full px-2 py-1 bg-white border border-slate-300 rounded text-xs font-bold text-slate-900"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-600 mb-0.5">
+                        Produto / Aplicação (Linha 2)
+                      </label>
+                      <input
+                        type="text"
+                        value={config.aplicacao}
+                        onChange={(e) => updateConfig({ aplicacao: e.target.value.toUpperCase() })}
+                        className="w-full px-2 py-1 bg-white border border-slate-300 rounded text-xs font-bold text-slate-900"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-600 mb-0.5">
+                        Medidas (Linha 3)
+                      </label>
+                      <input
+                        type="text"
+                        value={config.medidas}
+                        onChange={(e) => updateConfig({ medidas: e.target.value })}
+                        className="w-full px-2 py-1 bg-white border border-slate-300 rounded text-xs font-mono font-bold text-slate-900"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-600 mb-0.5">
+                        Data (Linha 5)
+                      </label>
+                      <input
+                        type="text"
+                        value={config.dataImpressao}
+                        onChange={(e) => updateConfig({ dataImpressao: e.target.value })}
+                        className="w-full px-2 py-1 bg-white border border-slate-300 rounded text-xs font-mono text-slate-900"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="pt-1.5 border-t border-slate-200 flex items-center justify-between">
+                    <label className="flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={config.imprimirPesos}
+                        onChange={(e) => updateConfig({ imprimirPesos: e.target.checked })}
+                        className="rounded text-blue-600 focus:ring-blue-500 w-3.5 h-3.5"
+                      />
+                      <span className="text-[11px] font-semibold text-slate-800">
+                        Imprimir pesos (PESO B: ... L: ...)
+                      </span>
+                    </label>
+
+                    <label className="flex items-center gap-1.5 cursor-pointer">
                       <input
                         type="checkbox"
                         checked={config.duplicarPistas}
-                        onChange={(e) => setConfig({ ...config, duplicarPistas: e.target.checked })}
-                        className="rounded text-blue-600 focus:ring-blue-500 w-4 h-4"
+                        onChange={(e) => updateConfig({ duplicarPistas: e.target.checked })}
+                        className="rounded text-blue-600 focus:ring-blue-500 w-3.5 h-3.5"
                       />
-                      <div>
-                        <span className="font-bold text-slate-900 block text-xs">
-                          Duplicar etiqueta nas 2 pistas (Foto 2)
-                        </span>
-                        <span className="text-[11px] text-slate-600 block">
-                          Gera a mesma etiqueta nos 2 lados do rolo para não desperdiçar etiqueta.
-                        </span>
-                      </div>
+                      <span className="text-[11px] font-semibold text-slate-800">
+                        Duplicar nas 2 pistas
+                      </span>
                     </label>
                   </div>
-                )}
-
-                {/* Tipo de Filme (Linha 1) */}
-                <div>
-                  <label className="block text-[11px] font-semibold text-slate-600 mb-1">
-                    Tipo de Filme / Estrutura (Linha 1)
-                  </label>
-                  <input
-                    type="text"
-                    value={config.tipoFilme}
-                    onChange={(e) => setConfig({ ...config, tipoFilme: e.target.value.toUpperCase() })}
-                    placeholder="Ex: FILME PEBD IMP"
-                    className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-md font-bold text-slate-900 text-xs"
-                  />
-                </div>
-
-                {/* Produto / Cliente (Linha 2) */}
-                <div>
-                  <label className="block text-[11px] font-semibold text-slate-600 mb-1">
-                    Produto / Cliente (Linha 2 - limpo conforme Foto 2)
-                  </label>
-                  <input
-                    type="text"
-                    value={config.aplicacao}
-                    onChange={(e) => setConfig({ ...config, aplicacao: e.target.value.toUpperCase() })}
-                    placeholder="Ex: PIPOCA LYPE"
-                    className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-md font-bold text-slate-900 text-xs"
-                  />
-                </div>
-
-                {/* Medidas e Data */}
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">
-                      Medidas (Linha 3)
-                    </label>
-                    <input
-                      type="text"
-                      value={config.medidas}
-                      onChange={(e) => setConfig({ ...config, medidas: e.target.value })}
-                      placeholder="Ex: 69X0,028"
-                      className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-md font-mono font-bold text-slate-900 text-xs"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">
-                      Data (Linha 5)
-                    </label>
-                    <input
-                      type="text"
-                      value={config.dataImpressao}
-                      onChange={(e) => setConfig({ ...config, dataImpressao: e.target.value })}
-                      placeholder="DD/MM/AAAA"
-                      className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded-md font-mono text-slate-900 text-xs"
-                    />
-                  </div>
-                </div>
-
-                {/* Toggles de formato e pesos */}
-                <div className="pt-2 border-t border-slate-200 space-y-2">
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={config.imprimirPesos}
-                      onChange={(e) => setConfig({ ...config, imprimirPesos: e.target.checked })}
-                      className="rounded text-blue-600 focus:ring-blue-500 w-4 h-4"
-                    />
-                    <span className="font-semibold text-slate-800">
-                      Imprimir pesos apurados (PESO B: ... L: ...)
-                    </span>
-                  </label>
-
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={config.incluirIdentificacaoOp}
-                      onChange={(e) => setConfig({ ...config, incluirIdentificacaoOp: e.target.checked })}
-                      className="rounded text-blue-600 focus:ring-blue-500 w-4 h-4"
-                    />
-                    <span className="text-slate-600">
-                      Incluir rodapé de rastreio (OP nº e Bobina #)
-                    </span>
-                  </label>
                 </div>
               </div>
             </div>
