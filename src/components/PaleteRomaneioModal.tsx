@@ -23,6 +23,7 @@ import {
   BarChart2,
   Activity,
   Filter,
+  FileDown,
 } from "lucide-react";
 import {
   Order,
@@ -46,6 +47,7 @@ import {
 import {
   EtiquetaZebraModal,
   printEtiquetasZebra,
+  emitirEtiquetasZebra,
   inferEtiquetaZebraData,
   EtiquetaBobinaItem,
 } from "./EtiquetaBobinaZebra";
@@ -608,7 +610,7 @@ export function PaleteRomaneioModal({
       `Bobina #${nextPos} adicionada: ${liquido.toFixed(1)} kg líquido (Salvo automaticamente)`
     );
 
-    // Impressão automática na Zebra se a opção estiver ligada pelo operador
+    // Impressão ou geração automática de arquivo na Zebra se a opção estiver ligada pelo operador
     if (autoPrintZebra) {
       try {
         const itemToPrint: EtiquetaBobinaItem = {
@@ -620,9 +622,9 @@ export function PaleteRomaneioModal({
           horario: newItem.horario,
         };
         const cfg = inferEtiquetaZebraData(selectedOrder, paleteToSave);
-        printEtiquetasZebra([itemToPrint], cfg);
+        emitirEtiquetasZebra([itemToPrint], cfg);
       } catch (err) {
-        console.error("Erro na impressão automática da etiqueta Zebra:", err);
+        console.error("Erro na emissão automática da etiqueta Zebra:", err);
       }
     }
 
@@ -1389,18 +1391,26 @@ export function PaleteRomaneioModal({
 
                 {/* BARRA DE INTEGRAÇÃO COM IMPRESSORA ZEBRA */}
                 <div className="mt-3.5 pt-3 border-t border-white/15 flex flex-wrap items-center justify-between gap-3 text-xs">
-                  <label className="flex items-center gap-2 cursor-pointer select-none">
-                    <input
-                      type="checkbox"
-                      checked={autoPrintZebra}
-                      onChange={(e) => toggleAutoPrintZebra(e.target.checked)}
-                      className="rounded text-amber-400 focus:ring-amber-400 w-4 h-4 cursor-pointer accent-amber-400"
-                    />
-                    <span className="font-semibold text-amber-300 flex items-center gap-1.5">
-                      <Printer className="w-3.5 h-3.5 text-amber-300" />
-                      Imprimir etiqueta Zebra automaticamente ao pesar (Enter)
-                    </span>
-                  </label>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <label className="flex items-center gap-2 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={autoPrintZebra}
+                        onChange={(e) => toggleAutoPrintZebra(e.target.checked)}
+                        className="rounded text-amber-400 focus:ring-amber-400 w-4 h-4 cursor-pointer accent-amber-400"
+                      />
+                      <span className="font-semibold text-amber-300 flex items-center gap-1.5">
+                        <Printer className="w-3.5 h-3.5 text-amber-300" />
+                        Auto-emitir etiqueta Zebra ao pesar (Enter)
+                      </span>
+                    </label>
+                    {autoPrintZebra && (
+                      <span className="text-[10px] bg-amber-400/20 text-amber-200 border border-amber-300/30 px-2 py-0.5 rounded font-bold flex items-center gap-1">
+                        <FileDown className="w-3 h-3 text-amber-300" />
+                        Gera Arquivo para Windows
+                      </span>
+                    )}
+                  </div>
 
                   <button
                     type="button"
@@ -1409,10 +1419,10 @@ export function PaleteRomaneioModal({
                       setZebraModalOpen(true);
                     }}
                     className="bg-white/15 hover:bg-white/25 text-white px-3 py-1 rounded-lg border border-white/20 flex items-center gap-1.5 font-semibold transition cursor-pointer"
-                    title="Configurar etiqueta térmica, rolo Zebra e imprimir em lote"
+                    title="Configurar etiqueta térmica, rolo Zebra e gerar arquivos ou imprimir em lote"
                   >
                     <Tag className="w-3.5 h-3.5 text-amber-300" />
-                    <span>Emitir Etiquetas Zebra ({itens.length})</span>
+                    <span>Emitir / Gerar Arquivo Zebra ({itens.length})</span>
                   </button>
                 </div>
               </div>

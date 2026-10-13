@@ -21,6 +21,10 @@ import {
   RotateCw,
   RefreshCw,
   Compass,
+  FileDown,
+  Terminal,
+  Table,
+  Download,
 } from "lucide-react";
 import { Order, ItemPaleteRomaneio, PaleteRomaneio } from "../types/forpack";
 
@@ -44,6 +48,8 @@ export interface EtiquetaZebraData {
   deslocamentoVerticalMm?: number; // Ajuste fino -5mm a +5mm
   deslocamentoHorizontalMm?: number; // Ajuste fino -5mm a +5mm
   espacamentoColunasMm?: number; // Gap entre as duas pistas, padrão 2mm
+  // Modo de saída ao clicar em imprimir:
+  modoSaidaImpressao?: "arquivo_prn" | "arquivo_csv" | "arquivo_bat" | "navegador"; // Padrão: "arquivo_prn" (Gera arquivo para impressão direta no Windows)
 }
 
 export interface EtiquetaBobinaItem {
@@ -92,6 +98,7 @@ export function saveEtiquetaZebraPreferences(config: Partial<EtiquetaZebraData>)
       deslocamentoVerticalMm: config.deslocamentoVerticalMm ?? prev.deslocamentoVerticalMm,
       deslocamentoHorizontalMm: config.deslocamentoHorizontalMm ?? prev.deslocamentoHorizontalMm,
       espacamentoColunasMm: config.espacamentoColunasMm ?? prev.espacamentoColunasMm,
+      modoSaidaImpressao: config.modoSaidaImpressao ?? prev.modoSaidaImpressao,
     };
     localStorage.setItem(ZEBRA_CONFIG_STORAGE_KEY, JSON.stringify(toSave));
   } catch (err) {
@@ -201,6 +208,7 @@ export function inferEtiquetaZebraData(
     deslocamentoVerticalMm: saved.deslocamentoVerticalMm ?? 0,
     deslocamentoHorizontalMm: saved.deslocamentoHorizontalMm ?? 0,
     espacamentoColunasMm: saved.espacamentoColunasMm ?? 2,
+    modoSaidaImpressao: (saved.modoSaidaImpressao as any) || "arquivo_prn",
     codigoOp: order?.numeroOp || order?.numeroPedido || palete?.numeroOp || "",
     numeroPalete: palete?.numeroPalete || "",
   };
@@ -642,6 +650,13 @@ export function generateZplCode(
   const heightDots = config.tamanhoEtiqueta === "60x40" ? 320 : 192;
   const totalWidthDots = is2Col ? widthDots * 2 + 16 : widthDots;
 
+  // Deslocamento milimétrico convertido para dots (203 DPI = 8 dots/mm)
+  const offXdots = Math.round((config.deslocamentoHorizontalMm || 0) * 8);
+  const offYdots = Math.round((config.deslocamentoVerticalMm || 0) * 8);
+  const lhCommand = (offXdots !== 0 || offYdots !== 0)
+    ? `^LH${Math.max(0, offXdots)},${Math.max(0, offYdots)}`
+    : "^LH0,0";
+
   const buildSingleLabelZpl = (item: EtiquetaBobinaItem | null, xOffset: number) => {
     if (!item) return "";
     const hasWeights = config.imprimirPesos && item.pesoBruto > 0;
@@ -689,7 +704,7 @@ ${traceText ? `^CF0,12\n^FO${xOffset + 6},168^FB332,1,0,C^FD${traceText}^FS` : "
 ^PW${totalWidthDots}
 ^LL${heightDots}
 ${zplOrientation}
-^LH0,0
+${lhCommand}
 ${buildSingleLabelZpl(item1, 8)}
 ${buildSingleLabelZpl(item2, widthDots + 18)}
 ^XZ`);
@@ -703,11 +718,195 @@ ${buildSingleLabelZpl(item2, widthDots + 18)}
 ^PW${widthDots}
 ^LL${heightDots}
 ${zplOrientation}
-^LH0,0
+${lhCommand}
 ${buildSingleLabelZpl(item, 6)}
 ^XZ`;
     })
     .join("\n\n");
+}
+
+/**
+ * Baixa um arquivo diretamente no computador do operador (Windows)
+ */
+export function downloadEtiquetaFile(
+  content: string,
+  filename: string,
+  mimeType: string = "text/plain;charset=utf-8"
+) {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/**
+ * Gera arquivo de dados CSV com todas as bobinas selecionadas
+ * Pronto para importação direta no ZebraDesigner 3, Seagull BarTender, NiceLabel ou Excel
+ */
+export function generateCsvData(
+  itens: EtiquetaBobinaItem[],
+  config: EtiquetaZebraData
+): string {
+  const headers = [
+    "OP",
+    "BOBINA_POSICAO",
+    "CODIGO_BOBINA",
+    "CLIENTE_PRODUTO",
+    "TIPO_FILME",
+    "APLICACAO",
+    "MEDIDAS",
+    "PESO_BRUTO_KG",
+    "TARA_KG",
+    "PESO_LIQUIDO_KG",
+    "DATA_IMPRESSAO",
+    "HORARIO",
+    "CODIGO_BARRAS",
+  ];
+
+  const rows = itens.map((item) => {
+    return [
+      config.codigoOp || "",
+      item.posicao,
+      item.codigoBobina || `BOB-${item.posicao.toString().padStart(2, "0")}`,
+      config.aplicacao || "",
+      config.tipoFilme || "",
+      config.aplicacao || "",
+      config.medidas || "",
+      item.pesoBruto > 0 ? item.pesoBruto.toFixed(1) : "",
+      item.tara > 0 ? item.tara.toFixed(1) : "",
+      item.pesoLiquido > 0 ? item.pesoLiquido.toFixed(1) : "",
+      config.dataImpressao || "",
+      item.horario || "",
+      `${config.codigoOp || "OP"}-${item.posicao}`,
+    ]
+      .map((val) => `"${String(val).replace(/"/g, '""')}"`)
+      .join(";");
+  });
+
+  return [headers.join(";"), ...rows].join("\r\n");
+}
+
+/**
+ * Gera script executável do Windows (.bat) para enviar o arquivo .prn diretamente à Zebra
+ * com apenas 1 duplo-clique, sem passar por navegador
+ */
+export function generateBatScript(
+  prnFilename: string,
+  printerName: string = "Zebra"
+): string {
+  return `@echo off
+chcp 65001 > nul
+cls
+echo ===================================================================
+echo   FORPACK EMBALAGENS - ENVIO DIRETO DE ETIQUETAS ZEBRA NO WINDOWS
+echo ===================================================================
+echo.
+echo Arquivo de etiquetas selecionado: ${prnFilename}
+echo.
+
+if not exist "%~dp0${prnFilename}" (
+    echo [ERRO] O arquivo "${prnFilename}" nao foi encontrado nesta pasta.
+    echo Por favor, coloque este arquivo .bat e o arquivo "${prnFilename}" juntos na mesma pasta (ex: Downloads).
+    echo.
+    pause
+    exit /b 1
+)
+
+echo Tentando enviar para a impressora Zebra no Windows...
+echo [Metodo 1] Enviando para compartilhamento local \\\\127.0.0.1\\${printerName} ...
+copy /b "%~dp0${prnFilename}" "\\\\127.0.0.1\\${printerName}" > nul 2>&1
+if not errorlevel 1 (
+    echo.
+    echo [SUCESSO] Etiquetas enviadas com sucesso para a Zebra!
+    echo.
+    timeout /t 3 > nul
+    exit /b 0
+)
+
+echo [Metodo 2] Enviando via comando PRINT do Windows (/D:"${printerName}") ...
+print /d:"${printerName}" "%~dp0${prnFilename}" > nul 2>&1
+if not errorlevel 1 (
+    echo.
+    echo [SUCESSO] Etiquetas enviadas para a fila de impressao da ${printerName}!
+    echo.
+    timeout /t 3 > nul
+    exit /b 0
+)
+
+echo.
+echo ===================================================================
+echo AVISO: O envio automatico via script encontrou um bloqueio de porta.
+echo.
+echo OPCOES SIMPLES PARA IMPRIMIR NO WINDOWS:
+echo 1) Zebra Setup Utilities (Mais facil e confiavel):
+echo    - Abra o Zebra Setup Utilities
+echo    - Selecione sua impressora e clique em "Action" ^> "Send File"
+echo    - Selecione o arquivo "${prnFilename}".
+echo.
+echo 2) Compartilhar a impressora no Windows com o nome "${printerName}":
+echo    - Painel de Controle ^> Dispositivos e Impressoras
+echo    - Clique com botao direito na Zebra ^> Propriedades da Impressora
+echo    - Aba "Compartilhamento" ^> Marque "Compartilhar esta impressora"
+echo    - Nome do compartilhamento: ${printerName}
+echo    - Apos isso, execute este arquivo .bat novamente!
+echo ===================================================================
+echo.
+pause
+`;
+}
+
+/**
+ * Função principal que executa a saída de etiquetas:
+ * - Gera e baixa arquivo .PRN / .ZPL (Recomendado para Windows - sem corte/rotação)
+ * - Gera e baixa arquivo de dados .CSV
+ * - Gera script Windows .BAT
+ * - Ou abre diálogo direto do navegador
+ */
+export function emitirEtiquetasZebra(
+  itens: EtiquetaBobinaItem[],
+  config: EtiquetaZebraData,
+  forceAction?: "arquivo_prn" | "arquivo_csv" | "arquivo_bat" | "navegador"
+): { type: "download" | "print"; filename?: string } {
+  const action = forceAction || config.modoSaidaImpressao || "arquivo_prn";
+
+  if (action === "arquivo_prn") {
+    const zpl = generateZplCode(itens, config);
+    const opPart = config.codigoOp ? `OP_${config.codigoOp}` : "Bobinas";
+    const posPart =
+      itens.length === 1
+        ? `_bobina_${itens[0].posicao}`
+        : `_${itens.length}_bobinas`;
+    const filename = `etiquetas_zebra_${opPart}${posPart}.prn`;
+    downloadEtiquetaFile(zpl, filename, "text/plain;charset=utf-8");
+    return { type: "download", filename };
+  }
+
+  if (action === "arquivo_csv") {
+    const csv = generateCsvData(itens, config);
+    const opPart = config.codigoOp ? `OP_${config.codigoOp}` : "Bobinas";
+    const filename = `dados_bobinas_zebra_${opPart}.csv`;
+    downloadEtiquetaFile(csv, filename, "text/csv;charset=utf-8");
+    return { type: "download", filename };
+  }
+
+  if (action === "arquivo_bat") {
+    const zpl = generateZplCode(itens, config);
+    const opPart = config.codigoOp ? `OP_${config.codigoOp}` : "Bobinas";
+    const prnName = `etiquetas_${opPart}.prn`;
+    downloadEtiquetaFile(zpl, prnName, "text/plain;charset=utf-8");
+    const batContent = generateBatScript(prnName);
+    downloadEtiquetaFile(batContent, `imprimir_${opPart}_windows.bat`, "text/plain;charset=utf-8");
+    return { type: "download", filename: prnName };
+  }
+
+  // Fallback: Diálogo direto do navegador
+  printEtiquetasZebra(itens, config);
+  return { type: "print" };
 }
 
 interface EtiquetaZebraModalProps {
@@ -734,7 +933,8 @@ export function EtiquetaZebraModal({
   const [savedNotice, setSavedNotice] = useState(false);
 
   // Tab mode
-  const [tab, setTab] = useState<"preview" | "lote" | "guia" | "zpl">("preview");
+  const [tab, setTab] = useState<"preview" | "arquivos" | "lote" | "guia" | "zpl">("preview");
+  const [downloadToast, setDownloadToast] = useState<{ title: string; message: string } | null>(null);
 
   // Selection mode: single bobina vs all bobinas from pallet vs blank batch
   const [printScope, setPrintScope] = useState<"single" | "all" | "blank">(
@@ -815,12 +1015,23 @@ export function EtiquetaZebraModal({
     return generateZplCode(targetItens, config);
   }, [targetItens, config]);
 
-  const handlePrint = () => {
-    printEtiquetasZebra(targetItens, config);
+  const showToast = (title: string, message: string) => {
+    setDownloadToast({ title, message });
+    setTimeout(() => setDownloadToast(null), 5000);
   };
 
-  const handlePrintTest = () => {
-    // Imprime apenas 1 avanço (1 par em 2 colunas ou 1 unidade) para testar alinhamento
+  const handleEmitir = (forceAction?: "arquivo_prn" | "arquivo_csv" | "arquivo_bat" | "navegador") => {
+    const res = emitirEtiquetasZebra(targetItens, config, forceAction);
+    if (res.type === "download") {
+      showToast(
+        "Arquivo Gerado com Sucesso!",
+        `O arquivo "${res.filename}" foi baixado. Pronto para impressão direta no Windows.`
+      );
+    }
+  };
+
+  const handleEmitirTest = (forceAction?: "arquivo_prn" | "arquivo_csv" | "navegador") => {
+    // Imprime ou gera arquivo com apenas 1 avanço (1 par em 2 colunas) para testar alinhamento
     const testItem: EtiquetaBobinaItem = {
       posicao: 1,
       pesoBruto: previewBobina.pesoBruto > 0 ? previewBobina.pesoBruto : 28.5,
@@ -828,7 +1039,13 @@ export function EtiquetaZebraModal({
       pesoLiquido: previewBobina.pesoLiquido > 0 ? previewBobina.pesoLiquido : 26.9,
       codigoBobina: "TESTE",
     };
-    printEtiquetasZebra([testItem], config);
+    const res = emitirEtiquetasZebra([testItem], config, forceAction);
+    if (res.type === "download") {
+      showToast(
+        "Teste Gerado com Sucesso!",
+        `O arquivo de teste "${res.filename}" foi baixado para validação direta no Windows.`
+      );
+    }
   };
 
   const handleCopyZpl = () => {
@@ -909,19 +1126,36 @@ export function EtiquetaZebraModal({
             onClick={() => setTab("preview")}
             className={`pb-2.5 px-3 border-b-2 flex items-center gap-1.5 transition cursor-pointer shrink-0 ${
               tab === "preview"
-                ? "border-blue-600 text-blue-600"
+                ? "border-blue-600 text-blue-600 font-bold"
                 : "border-transparent text-slate-500 hover:text-slate-800"
             }`}
           >
             <Compass className="w-3.5 h-3.5 text-blue-600" />
-            <span className="font-bold">Sentido & Alinhamento</span>
+            <span>Sentido & Alinhamento</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab("arquivos")}
+            className={`pb-2.5 px-3 border-b-2 flex items-center gap-1.5 transition cursor-pointer shrink-0 ${
+              tab === "arquivos"
+                ? "border-emerald-600 text-emerald-700 font-bold"
+                : "border-transparent text-slate-500 hover:text-slate-800"
+            }`}
+          >
+            <FileDown className="w-3.5 h-3.5 text-emerald-600" />
+            <span className="flex items-center gap-1">
+              <span>Arquivos Windows (Direto)</span>
+              <span className="text-[9px] bg-emerald-100 text-emerald-800 px-1.5 py-0.2 rounded-full font-black">
+                Solução
+              </span>
+            </span>
           </button>
           <button
             type="button"
             onClick={() => setTab("lote")}
             className={`pb-2.5 px-3 border-b-2 flex items-center gap-1.5 transition cursor-pointer shrink-0 ${
               tab === "lote"
-                ? "border-blue-600 text-blue-600"
+                ? "border-blue-600 text-blue-600 font-bold"
                 : "border-transparent text-slate-500 hover:text-slate-800"
             }`}
           >
@@ -933,19 +1167,19 @@ export function EtiquetaZebraModal({
             onClick={() => setTab("guia")}
             className={`pb-2.5 px-3 border-b-2 flex items-center gap-1.5 transition cursor-pointer shrink-0 ${
               tab === "guia"
-                ? "border-blue-600 text-blue-600"
+                ? "border-blue-600 text-blue-600 font-bold"
                 : "border-transparent text-slate-500 hover:text-slate-800"
             }`}
           >
             <Wrench className="w-3.5 h-3.5 text-amber-500" />
-            <span className="font-bold">Guia da Impressora & Driver</span>
+            <span>Guia da Impressora & Driver</span>
           </button>
           <button
             type="button"
             onClick={() => setTab("zpl")}
             className={`pb-2.5 px-3 border-b-2 flex items-center gap-1.5 transition cursor-pointer shrink-0 ${
               tab === "zpl"
-                ? "border-blue-600 text-blue-600"
+                ? "border-blue-600 text-blue-600 font-bold"
                 : "border-transparent text-slate-500 hover:text-slate-800"
             }`}
           >
@@ -957,7 +1191,141 @@ export function EtiquetaZebraModal({
         {/* CORPO DO MODAL */}
         <div className="p-5 overflow-y-auto space-y-4 flex-1">
           {tab === "preview" && (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-5 items-start">
+            <div className="space-y-4">
+              {/* CARD: IMPRESSÃO DIRETA NO WINDOWS (GERAÇÃO DE ARQUIVO) */}
+              <div className="bg-gradient-to-r from-slate-900 via-blue-950 to-slate-900 text-white p-3.5 rounded-xl border border-blue-400/30 shadow-sm space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <div className="w-7 h-7 rounded-lg bg-blue-500/20 border border-blue-400/30 flex items-center justify-center text-blue-300 shrink-0">
+                      <FileDown className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h4 className="text-xs font-bold text-white flex items-center gap-2">
+                        <span>Impressão Direta no Windows (Geração de Arquivo)</span>
+                        <span className="text-[9px] bg-emerald-500/20 text-emerald-300 border border-emerald-400/40 px-1.5 py-0.2 rounded font-black">
+                          Recomendado
+                        </span>
+                      </h4>
+                      <p className="text-[10.5px] text-blue-200/80">
+                        Elimina o diálogo do navegador — o arquivo é impresso direto pelo Windows sem margens erradas ou giros indesejados.
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setTab("arquivos")}
+                    className="text-[10px] text-blue-300 hover:text-white underline cursor-pointer ml-auto font-semibold"
+                  >
+                    Ver instruções completas →
+                  </button>
+                </div>
+
+                {/* SELETOR DO MODO DE SAÍDA */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-0.5">
+                  <button
+                    type="button"
+                    onClick={() => updateConfig({ modoSaidaImpressao: "arquivo_prn" })}
+                    className={`p-2 rounded-lg text-left transition cursor-pointer border flex flex-col justify-between ${
+                      (config.modoSaidaImpressao || "arquivo_prn") === "arquivo_prn"
+                        ? "bg-blue-600/50 border-blue-400 text-white shadow-2xs"
+                        : "bg-white/5 border-white/10 text-slate-300 hover:bg-white/10"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-[11px] font-bold flex items-center gap-1.5">
+                        <FileDown className="w-3.5 h-3.5 text-blue-300" />
+                        Arquivo .PRN / .ZPL
+                      </span>
+                      {(config.modoSaidaImpressao || "arquivo_prn") === "arquivo_prn" && (
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                      )}
+                    </div>
+                    <span className="text-[9.5px] text-blue-200/70">
+                      Código nativo Zebra. Envio sem distorção.
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => updateConfig({ modoSaidaImpressao: "arquivo_csv" })}
+                    className={`p-2 rounded-lg text-left transition cursor-pointer border flex flex-col justify-between ${
+                      config.modoSaidaImpressao === "arquivo_csv"
+                        ? "bg-blue-600/50 border-blue-400 text-white shadow-2xs"
+                        : "bg-white/5 border-white/10 text-slate-300 hover:bg-white/10"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-[11px] font-bold flex items-center gap-1.5">
+                        <Table className="w-3.5 h-3.5 text-amber-300" />
+                        Planilha .CSV
+                      </span>
+                      {config.modoSaidaImpressao === "arquivo_csv" && (
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                      )}
+                    </div>
+                    <span className="text-[9.5px] text-blue-200/70">
+                      Para BarTender, ZebraDesigner 3 ou Excel.
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => updateConfig({ modoSaidaImpressao: "navegador" })}
+                    className={`p-2 rounded-lg text-left transition cursor-pointer border flex flex-col justify-between ${
+                      config.modoSaidaImpressao === "navegador"
+                        ? "bg-blue-600/50 border-blue-400 text-white shadow-2xs"
+                        : "bg-white/5 border-white/10 text-slate-300 hover:bg-white/10"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-[11px] font-bold flex items-center gap-1.5">
+                        <Printer className="w-3.5 h-3.5 text-slate-300" />
+                        Diálogo Navegador
+                      </span>
+                      {config.modoSaidaImpressao === "navegador" && (
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                      )}
+                    </div>
+                    <span className="text-[9.5px] text-blue-200/70">
+                      Janela comum do Chrome / Edge (Ctrl+P).
+                    </span>
+                  </button>
+                </div>
+
+                {/* BOTÕES RÁPIDOS DE DOWNLOAD IMEDIATO */}
+                <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-white/10">
+                  <span className="text-[10px] text-blue-200 font-semibold mr-1">Baixar agora:</span>
+                  <button
+                    type="button"
+                    onClick={() => handleEmitir("arquivo_prn")}
+                    className="px-2.5 py-1 bg-blue-500 hover:bg-blue-400 text-white font-bold rounded-lg text-[10.5px] flex items-center gap-1.5 transition cursor-pointer shadow-xs active:scale-95"
+                    title="Baixa arquivo .PRN de todas as bobinas selecionadas"
+                  >
+                    <FileDown className="w-3.5 h-3.5" />
+                    <span>Baixar .PRN ({targetItens.length})</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleEmitir("arquivo_csv")}
+                    className="px-2.5 py-1 bg-white/15 hover:bg-white/25 text-white font-bold rounded-lg text-[10.5px] flex items-center gap-1.5 transition cursor-pointer border border-white/20 active:scale-95"
+                    title="Baixa arquivo CSV formatado para BarTender ou ZebraDesigner"
+                  >
+                    <Table className="w-3.5 h-3.5" />
+                    <span>Baixar .CSV</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleEmitir("arquivo_bat")}
+                    className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg text-[10.5px] flex items-center gap-1.5 transition cursor-pointer shadow-xs active:scale-95"
+                    title="Baixa o .prn acompanhado do script .bat do Windows para enviar com duplo-clique"
+                  >
+                    <Terminal className="w-3.5 h-3.5" />
+                    <span>Script Windows .BAT</span>
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5 items-start">
               {/* COLUNA ESQUERDA: SIMULADOR REAL DO ROLO TÉRMICO COM SENTIDO DE SAÍDA */}
               <div className="flex flex-col items-center">
                 <div className="flex items-center justify-between w-full mb-1.5 px-1">
@@ -1137,7 +1505,7 @@ export function EtiquetaZebraModal({
                   </div>
                   <button
                     type="button"
-                    onClick={handlePrintTest}
+                    onClick={() => handleEmitirTest()}
                     className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg text-xs flex items-center gap-1.5 shadow-sm transition cursor-pointer active:scale-95 shrink-0"
                   >
                     <Printer className="w-3.5 h-3.5" />
@@ -1276,7 +1644,7 @@ export function EtiquetaZebraModal({
                       type="button"
                       onClick={() => {
                         updateConfig({ orientacao: "rotacionada_270", modoEnvioCss: "dimensoes_puras" });
-                        handlePrintTest();
+                        handleEmitirTest();
                       }}
                       className="w-full p-2 bg-white hover:bg-amber-50 border border-amber-300 rounded-lg text-left flex items-center justify-between transition cursor-pointer group shadow-2xs"
                     >
@@ -1297,7 +1665,7 @@ export function EtiquetaZebraModal({
                       type="button"
                       onClick={() => {
                         updateConfig({ orientacao: "invertida_180" });
-                        handlePrintTest();
+                        handleEmitirTest();
                       }}
                       className="w-full p-2 bg-white hover:bg-blue-100/60 border border-blue-200 rounded-lg text-left flex items-center justify-between transition cursor-pointer group shadow-2xs"
                     >
@@ -1518,6 +1886,167 @@ export function EtiquetaZebraModal({
                         Duplicar nas 2 pistas
                       </span>
                     </label>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          )}
+
+          {tab === "arquivos" && (
+            <div className="space-y-4">
+              {/* BANNER PRINCIPAL EXPLICATIVO */}
+              <div className="p-4 bg-emerald-50 border border-emerald-300 rounded-2xl shadow-xs">
+                <div className="flex items-start gap-3">
+                  <div className="w-9 h-9 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0 shadow-xs">
+                    <FileDown className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-bold text-emerald-950 flex items-center gap-2">
+                      <span>Impressão Direta no Windows (Elimina Erros do Navegador)</span>
+                      <span className="text-[10px] bg-emerald-200 text-emerald-900 px-2 py-0.5 rounded-full font-black">
+                        Solução 100% Estável
+                      </span>
+                    </h4>
+                    <p className="text-xs text-emerald-900/90 mt-1 leading-relaxed">
+                      Ao imprimir direto pelo navegador (Chrome/Edge), o Windows passa pelo renderizador Web, que pode cortar margens, distorcer a escala ou girar a folha de lado.
+                      <br />
+                      <strong>Ao gerar o arquivo abaixo</strong>, você envia os comandos técnicos nativos diretamente para a impressora Zebra no Windows, garantindo precisão milimétrica, alinhamento perfeito e velocidade instantânea!
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* OPÇÕES DE ARQUIVOS */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5">
+                {/* 1. ARQUIVO .PRN / .ZPL */}
+                <div className="bg-white border-2 border-blue-400 rounded-xl p-4 shadow-xs flex flex-col justify-between space-y-3 relative overflow-hidden">
+                  <div className="absolute top-0 right-0 bg-blue-600 text-white text-[9px] font-black uppercase px-2 py-0.5 rounded-bl-lg tracking-wider">
+                    Mais Utilizado
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2 text-blue-700 font-bold text-xs uppercase mb-1">
+                      <FileDown className="w-4 h-4" />
+                      <span>Arquivo .PRN / .ZPL</span>
+                    </div>
+                    <strong className="text-sm font-bold text-slate-900 block">
+                      Código Nativo Zebra (203 DPI)
+                    </strong>
+                    <p className="text-[11px] text-slate-600 mt-1 leading-relaxed">
+                      Contém o código ZPL oficial calibrado para etiqueta de 43x24 mm em 2 colunas. Ideal para envio direto sem navegador.
+                    </p>
+                  </div>
+
+                  <div className="space-y-2 pt-2 border-t border-slate-100">
+                    <button
+                      type="button"
+                      onClick={() => handleEmitir("arquivo_prn")}
+                      className="w-full py-2 px-3 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg text-xs flex items-center justify-center gap-2 transition cursor-pointer shadow-xs active:scale-95"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>Baixar .PRN ({targetItens.length} bobinas)</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleEmitirTest("arquivo_prn")}
+                      className="w-full py-1.5 px-3 bg-blue-50 hover:bg-blue-100 text-blue-800 font-semibold rounded-lg text-[11px] flex items-center justify-center gap-1.5 border border-blue-200 transition cursor-pointer"
+                    >
+                      <span>Baixar Teste .PRN (1 Par)</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* 2. SCRIPT EXECUTÁVEL .BAT DO WINDOWS */}
+                <div className="bg-white border border-emerald-300 rounded-xl p-4 shadow-xs flex flex-col justify-between space-y-3">
+                  <div>
+                    <div className="flex items-center gap-2 text-emerald-700 font-bold text-xs uppercase mb-1">
+                      <Terminal className="w-4 h-4" />
+                      <span>Script .BAT Windows</span>
+                    </div>
+                    <strong className="text-sm font-bold text-slate-900 block">
+                      Envio Automático (1 Duplo-Clique)
+                    </strong>
+                    <p className="text-[11px] text-slate-600 mt-1 leading-relaxed">
+                      Gera um script executável do Windows que manda o arquivo .PRN direto para a porta ou fila da Zebra sem precisar abrir nada.
+                    </p>
+                  </div>
+
+                  <div className="space-y-2 pt-2 border-t border-slate-100">
+                    <button
+                      type="button"
+                      onClick={() => handleEmitir("arquivo_bat")}
+                      className="w-full py-2 px-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg text-xs flex items-center justify-center gap-2 transition cursor-pointer shadow-xs active:scale-95"
+                    >
+                      <Terminal className="w-3.5 h-3.5" />
+                      <span>Baixar Pacote .BAT</span>
+                    </button>
+                    <span className="text-[10px] text-slate-500 block text-center">
+                      Salvar na mesma pasta do .PRN e dar duplo-clique.
+                    </span>
+                  </div>
+                </div>
+
+                {/* 3. PLANILHA DE DADOS .CSV */}
+                <div className="bg-white border border-amber-300 rounded-xl p-4 shadow-xs flex flex-col justify-between space-y-3">
+                  <div>
+                    <div className="flex items-center gap-2 text-amber-700 font-bold text-xs uppercase mb-1">
+                      <Table className="w-4 h-4" />
+                      <span>Planilha .CSV de Dados</span>
+                    </div>
+                    <strong className="text-sm font-bold text-slate-900 block">
+                      BarTender / ZebraDesigner 3
+                    </strong>
+                    <p className="text-[11px] text-slate-600 mt-1 leading-relaxed">
+                      Todas as bobinas, pesos, OP, cliente e código em colunas prontas para mesclagem no seu modelo do Windows ou Excel.
+                    </p>
+                  </div>
+
+                  <div className="space-y-2 pt-2 border-t border-slate-100">
+                    <button
+                      type="button"
+                      onClick={() => handleEmitir("arquivo_csv")}
+                      className="w-full py-2 px-3 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-lg text-xs flex items-center justify-center gap-2 transition cursor-pointer shadow-xs active:scale-95"
+                    >
+                      <Table className="w-3.5 h-3.5" />
+                      <span>Baixar Planilha .CSV</span>
+                    </button>
+                    <span className="text-[10px] text-slate-500 block text-center">
+                      Compatível com BarTender, ZebraDesigner e Excel.
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* GUIA PASSO A PASSO: COMO IMPRIMIR O ARQUIVO NO WINDOWS */}
+              <div className="p-4 bg-slate-900 text-white rounded-xl border border-slate-800 space-y-3">
+                <h4 className="text-xs font-bold uppercase tracking-wider text-amber-400 flex items-center gap-2">
+                  <Info className="w-4 h-4 text-amber-400" />
+                  <span>Como Imprimir o Arquivo no Windows (Escolha o seu método preferido):</span>
+                </h4>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                  <div className="p-3 bg-slate-800/80 rounded-lg border border-slate-700 space-y-1.5">
+                    <strong className="text-emerald-400 block font-bold">
+                      Método 1: Zebra Setup Utilities (Oficial e 100% Gratuito da Zebra)
+                    </strong>
+                    <ol className="list-decimal list-inside space-y-1 text-slate-300 text-[11px]">
+                      <li>Baixe o arquivo <strong>.PRN</strong> acima.</li>
+                      <li>Abra o aplicativo <strong>Zebra Setup Utilities</strong> no Windows.</li>
+                      <li>Selecione sua impressora e clique no menu <em>"Action" &gt; "Send File"</em> (ou "Enviar Arquivo").</li>
+                      <li>Selecione o arquivo baixado. A impressora imprimirá instantaneamente!</li>
+                    </ol>
+                  </div>
+
+                  <div className="p-3 bg-slate-800/80 rounded-lg border border-slate-700 space-y-1.5">
+                    <strong className="text-blue-400 block font-bold">
+                      Método 2: BarTender ou ZebraDesigner 3 (Para quem já tem modelo)
+                    </strong>
+                    <ol className="list-decimal list-inside space-y-1 text-slate-300 text-[11px]">
+                      <li>Baixe o arquivo <strong>.CSV</strong> acima.</li>
+                      <li>Abra o seu modelo no BarTender ou ZebraDesigner.</li>
+                      <li>Conecte o arquivo CSV como fonte de dados (Database Connection).</li>
+                      <li>Clique em Imprimir no Windows. Todas as bobinas sairão perfeitas!</li>
+                    </ol>
                   </div>
                 </div>
               </div>
@@ -1826,11 +2355,23 @@ export function EtiquetaZebraModal({
         </div>
 
         {/* RODAPÉ DE AÇÃO */}
-        <div className="bg-slate-50 border-t border-slate-200 px-5 py-3 flex items-center justify-between shrink-0">
+        <div className="bg-slate-50 border-t border-slate-200 px-5 py-3 flex flex-wrap items-center justify-between gap-3 shrink-0">
           <div className="text-xs text-slate-600">
-            Serão impressas: <strong>{targetItens.length} bobina(s)</strong> ·{" "}
-            <strong>{config.tamanhoEtiqueta === "43x24" ? "4,30 x 2,40 cm (Horizontal)" : `${config.tamanhoEtiqueta} mm`}</strong>
-            {config.formatoRolo === "2_colunas" ? " · Rolo 2 Colunas (88 mm)" : ""}
+            <span>
+              Saída: <strong>{targetItens.length} bobina(s)</strong> ·{" "}
+              <strong>{config.tamanhoEtiqueta === "43x24" ? "4,30 x 2,40 cm" : `${config.tamanhoEtiqueta} mm`}</strong>
+              {config.formatoRolo === "2_colunas" ? " · Rolo 2 Colunas (88 mm)" : ""}
+            </span>
+            <span className="ml-2 inline-flex items-center gap-1 font-semibold text-slate-500">
+              Modo:{" "}
+              <span className="font-bold text-blue-800 bg-blue-100 px-1.5 py-0.5 rounded text-[11px]">
+                {(config.modoSaidaImpressao || "arquivo_prn") === "arquivo_prn"
+                  ? "Arquivo .PRN Windows"
+                  : config.modoSaidaImpressao === "arquivo_csv"
+                  ? "Planilha .CSV"
+                  : "Navegador Chrome"}
+              </span>
+            </span>
           </div>
 
           <div className="flex items-center gap-2">
@@ -1839,27 +2380,72 @@ export function EtiquetaZebraModal({
               onClick={onClose}
               className="px-3.5 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-200 rounded-lg transition cursor-pointer"
             >
-              Cancelar
+              Fechar
             </button>
             <button
               type="button"
-              onClick={handlePrintTest}
-              className="px-3.5 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-300 font-bold rounded-lg text-xs transition shadow-2xs flex items-center gap-1.5 cursor-pointer active:scale-95"
-              title="Imprime apenas 1 avanço (1 par) para validar alinhamento sem desperdício de etiqueta"
+              onClick={() => handleEmitirTest()}
+              className="px-3.5 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 font-bold rounded-lg text-xs transition shadow-2xs flex items-center gap-1.5 cursor-pointer active:scale-95"
+              title={(config.modoSaidaImpressao || "arquivo_prn") === "arquivo_prn" ? "Gera arquivo .PRN de 1 par para validar no Windows" : "Imprime 1 par para testar alinhamento"}
             >
-              <Printer className="w-3.5 h-3.5" />
-              <span>Testar 1 Par</span>
+              {(config.modoSaidaImpressao || "arquivo_prn") === "arquivo_prn" ? (
+                <>
+                  <FileDown className="w-3.5 h-3.5 text-emerald-700" />
+                  <span>Gerar Teste .PRN</span>
+                </>
+              ) : (
+                <>
+                  <Printer className="w-3.5 h-3.5 text-emerald-700" />
+                  <span>Testar 1 Par</span>
+                </>
+              )}
             </button>
             <button
               type="button"
-              onClick={handlePrint}
+              onClick={() => handleEmitir()}
               className="px-4 py-2 bg-blue-600 hover:bg-blue-700 active:scale-95 text-white font-bold rounded-lg text-xs transition shadow-xs flex items-center gap-2 cursor-pointer"
             >
-              <Printer className="w-4 h-4" />
-              <span>Imprimir Todas</span>
+              {(config.modoSaidaImpressao || "arquivo_prn") === "arquivo_prn" ? (
+                <>
+                  <FileDown className="w-4 h-4" />
+                  <span>Gerar Arquivo .PRN ({targetItens.length})</span>
+                </>
+              ) : config.modoSaidaImpressao === "arquivo_csv" ? (
+                <>
+                  <Table className="w-4 h-4" />
+                  <span>Gerar Planilha .CSV ({targetItens.length})</span>
+                </>
+              ) : (
+                <>
+                  <Printer className="w-4 h-4" />
+                  <span>Imprimir Todas</span>
+                </>
+              )}
             </button>
           </div>
         </div>
+
+        {/* NOTIFICAÇÃO TOAST DE DOWNLOAD DO ARQUIVO */}
+        {downloadToast && (
+          <div className="absolute bottom-16 right-5 z-60 bg-slate-900 text-white px-4 py-3 rounded-xl shadow-2xl border border-emerald-400 flex items-start gap-3 max-w-sm animate-in fade-in slide-in-from-bottom-2">
+            <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
+            <div className="text-left">
+              <strong className="text-xs font-bold text-white block">
+                {downloadToast.title}
+              </strong>
+              <span className="text-[11px] text-slate-300 block leading-tight mt-0.5">
+                {downloadToast.message}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setDownloadToast(null)}
+              className="text-slate-400 hover:text-white ml-auto cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
