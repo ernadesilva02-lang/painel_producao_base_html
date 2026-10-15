@@ -11,7 +11,13 @@ import {
   loadCustosSetor,
   loadInsumos,
   DEFAULT_CUSTOS_SETORES,
+  readStorageJson,
+  getDataSourceFlags,
 } from "./supabaseApi";
+
+// ============================================================================
+// TIPOS
+// ============================================================================
 
 export interface ApontamentoRaw {
   id: string;
@@ -41,16 +47,71 @@ export interface PedidoOpRaw {
   preco_venda_kg?: number;
 }
 
-// Produtividade padrão de máquina em kg/hora quando não há horas explicitamente digitadas
+/**
+ * Mesmo resumo de antes, com quatro avisos novos que a tela pode usar:
+ *  - preco_estimado:       o preço de venda NÃO foi informado (é sugestão do sistema)
+ *  - parcial:              a OP ainda não está finalizada (margem provisória)
+ *  - custo_mp_estimado:    não achou a resina nos insumos; usou valor padrão
+ *  - horas_estimadas_flag: alguma hora de máquina/mão de obra foi estimada, não apontada
+ */
+export interface OpFinancialSummaryExt extends OpFinancialSummary {
+  preco_estimado: boolean;
+  parcial: boolean;
+  custo_mp_estimado: boolean;
+  horas_estimadas_flag: boolean;
+  status_producao?: string;
+}
+
+export interface TotaisFinanceiros {
+  quantidade: number;
+  totalReceita: number;
+  totalCusto: number;
+  totalLucro: number;
+  margemPct: number;
+}
+
+export interface LoadAllOpFinancialsResult {
+  summaries: OpFinancialSummaryExt[];
+  custosSetor: CustoSetorConfig[];
+  insumos: Insumo[];
+  totalReceita: number;
+  totalCusto: number;
+  totalLucro: number;
+  margemGeralPct: number;
+  /** Totais só das OPs finalizadas (sem a distorção das que estão em andamento). */
+  finalizadas: TotaisFinanceiros;
+  quantidadeParciais: number;
+  quantidadePrecoEstimado: number;
+  /** Mensagens para exibir na tela (falhas de leitura, valores padrão em uso etc.). */
+  avisos: string[];
+}
+
+// ============================================================================
+// PARÂMETROS DO CÁLCULO (ajuste aqui, em um só lugar)
+// ============================================================================
+
+// Percentual do valor da resina que se recupera ao moer/vender a apara.
+const RECUPERACAO_APARA = 0.45;
+
+// Custo de tinta/solvente/fotopolímero por kg impresso. Valor fixo de estimativa.
+const CUSTO_TINTA_POR_KG_IMPRESSO = 1.35;
+
+// Produtividade padrão (kg/hora) quando não há horas apontadas.
 const VELOCIDADE_PADRAO_SETOR: Record<string, number> = {
-  EXTRUSÃO: 65, // 65 kg/h
-  IMPRESSÃO: 75, // 75 kg/h
-  LAMINAÇÃO: 85, // 85 kg/h
-  REBOBINADEIRA: 100, // 100 kg/h
-  CORTE: 45, // 45 kg/h
+  EXTRUSÃO: 65,
+  IMPRESSÃO: 75,
+  LAMINAÇÃO: 85,
+  REBOBINADEIRA: 100,
+  CORTE: 45,
 };
 
-// Sugestão padrão de preço de venda por tipo de material caso não tenha sido cadastrado
+const PRICING_KEY = "config:financial_pricing";
+
+// ============================================================================
+// PREÇO DE VENDA
+// ============================================================================
+
+// Sugestão de preço quando a OP não tem preço informado. É uma ESTIMATIVA.
 export function getPrecoVendaSugerido(material: string = ""): number {
   const m = material.toUpperCase();
   if (m.includes("IMPRESSO")) {
@@ -63,62 +124,35 @@ export function getPrecoVendaSugerido(material: string = ""): number {
   return 16.5; // PEBD virgem padrão
 }
 
-// Identifica o custo de matéria-prima baseada na lista de insumos cadastrados
-export function getCustoMateriaPrimaKg(material: string = "", insumos: Insumo[] = []): number {
-  const m = material.toUpperCase();
-
-  // Procura primeiro insumo correspondente na tabela de insumos
-  if (insumos.length > 0) {
-    if (m.includes("PP")) {
-      const insPP = insumos.find(i => i.nome.toUpperCase().includes("PP") || i.codigo.toUpperCase().includes("PP"));
-      if (insPP && insPP.custo_unitario_medio > 0) return insPP.custo_unitario_medio;
-    }
-    if (m.includes("RECICLADO") || m.includes("REC")) {
-      const insRec = insumos.find(i => i.categoria === "RESINA" && (i.nome.toUpperCase().includes("REC") || i.codigo.toUpperCase().includes("REC")));
-      if (insRec && insRec.custo_unitario_medio > 0) return insRec.custo_unitario_medio;
-    }
-    // Resina virgem padrão
-    const insVirgem = insumos.find(i => i.categoria === "RESINA");
-    if (insVirgem && insVirgem.custo_unitario_medio > 0) return insVirgem.custo_unitario_medio;
-  }
-
-  // Fallbacks de mercado plástico
-  if (m.includes("PP")) return 9.2;
-  if (m.includes("RECICLADO") || m.includes("REC")) return 5.8;
-  return 8.45; // PEBD virgem
-}
-
-// Carrega preços customizados salvos em app_storage
+// Lê os preços salvos. Nunca lança erro (para a tela abrir mesmo se falhar).
 export async function loadSavedPricing(): Promise<Record<string, number>> {
   try {
-    const res = await fetch(
-      `${SUPABASE_URL}/rest/v1/app_storage?key=eq.config:financial_pricing&select=value`,
-      {
-        headers: {
-          apikey: SUPABASE_KEY,
-          Authorization: `Bearer ${SUPABASE_KEY}`,
-        },
-        cache: "no-store",
-      }
-    );
-    if (res.ok) {
-      const data = await res.json();
-      if (data.length > 0 && data[0].value) {
-        return JSON.parse(data[0].value);
-      }
-    }
-    return {};
-  } catch {
+    return (await readStorageJson<Record<string, number>>(PRICING_KEY)) ?? {};
+  } catch (err) {
+    console.error("[financialEngine] não foi possível ler os preços salvos:", err);
     return {};
   }
 }
 
-// Salva preços customizados de OPs
+/**
+ * Salva (ou remove, se o preço for vazio/zero) o preço de venda de uma OP.
+ * Correções em relação à versão anterior:
+ *  - se a leitura dos preços atuais falhar, NÃO grava (antes, uma falha de leitura
+ *    fazia o sistema gravar um mapa só com este preço e apagar todos os outros);
+ *  - confere se o banco confirmou a gravação e lança erro se não confirmou.
+ */
 export async function saveOpSellingPrice(opId: string, precoVendaKg: number): Promise<void> {
-  const currentPricing = await loadSavedPricing();
-  currentPricing[opId] = precoVendaKg;
+  if (!opId) throw new Error("OP inválida para salvar o preço.");
 
-  await fetch(`${SUPABASE_URL}/rest/v1/app_storage?select=key,value,updated_at`, {
+  const atual = (await readStorageJson<Record<string, number>>(PRICING_KEY)) ?? {};
+  const preco = Number(precoVendaKg);
+  if (Number.isFinite(preco) && preco > 0) {
+    atual[opId] = preco;
+  } else {
+    delete atual[opId];
+  }
+
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/app_storage?on_conflict=key&select=key,value,updated_at`, {
     method: "POST",
     headers: {
       apikey: SUPABASE_KEY,
@@ -127,32 +161,98 @@ export async function saveOpSellingPrice(opId: string, precoVendaKg: number): Pr
       Prefer: "resolution=merge-duplicates,return=representation",
     },
     body: JSON.stringify({
-      key: "config:financial_pricing",
-      value: JSON.stringify(currentPricing),
+      key: PRICING_KEY,
+      value: JSON.stringify(atual),
       updated_at: new Date().toISOString(),
     }),
   });
+  if (!res.ok) throw new Error("Não foi possível salvar o preço de venda.");
 }
 
-// Calcula o resumo financeiro para uma única OP
+// ============================================================================
+// CUSTO DA MATÉRIA-PRIMA
+// ============================================================================
+
+type FamiliaResina = "PP" | "PEAD" | "PELBD" | "RECICLADO" | "PEBD";
+
+function familiaDaResina(material: string): FamiliaResina {
+  const m = material.toUpperCase();
+  if (m.includes("PP")) return "PP";
+  if (m.includes("RECICLADO") || m.includes("REC")) return "RECICLADO";
+  if (m.includes("PELBD")) return "PELBD";
+  if (m.includes("PEAD")) return "PEAD";
+  return "PEBD"; // virgem / padrão
+}
+
+// Palavras que identificam a resina no código ou no nome do insumo cadastrado.
+const BUSCA_INSUMO: Record<FamiliaResina, string[]> = {
+  PP: ["PP", "POLIPROPILENO"],
+  PEAD: ["PEAD"],
+  PELBD: ["PELBD", "LINEAR"],
+  RECICLADO: ["REC"],
+  PEBD: ["PEBD"],
+};
+
+// Valores de mercado usados só quando a resina não está cadastrada nos insumos.
+const CUSTO_MP_PADRAO: Record<FamiliaResina, number> = {
+  PP: 9.2,
+  PEAD: 8.45,
+  PELBD: 8.45,
+  RECICLADO: 5.8,
+  PEBD: 8.45,
+};
+
+/**
+ * Custo por kg da resina do material. Antes, o sistema pegava a PRIMEIRA resina
+ * da lista (por ordem alfabética, o PEAD) para qualquer material virgem. Agora
+ * procura a resina correspondente ao material; se não achar, usa o valor padrão
+ * e marca como estimado.
+ */
+export function resolveCustoMateriaPrima(
+  material: string = "",
+  insumos: Insumo[] = []
+): { valor: number; estimado: boolean } {
+  const familia = familiaDaResina(material);
+  const palavras = BUSCA_INSUMO[familia];
+
+  const achado = insumos.find(
+    (i) =>
+      i.categoria === "RESINA" &&
+      Number(i.custo_unitario_medio) > 0 &&
+      palavras.some((p) => `${i.codigo ?? ""} ${i.nome ?? ""}`.toUpperCase().includes(p))
+  );
+
+  if (achado) return { valor: Number(achado.custo_unitario_medio), estimado: false };
+  return { valor: CUSTO_MP_PADRAO[familia], estimado: true };
+}
+
+export function getCustoMateriaPrimaKg(material: string = "", insumos: Insumo[] = []): number {
+  return resolveCustoMateriaPrima(material, insumos).valor;
+}
+
+// ============================================================================
+// CÁLCULO DE UMA OP
+// ============================================================================
+
 export function computeOpFinancial(
   op: PedidoOpRaw,
   apontamentos: ApontamentoRaw[],
   custosSetor: CustoSetorConfig[],
   insumos: Insumo[],
   savedPrices: Record<string, number>
-): OpFinancialSummary {
+): OpFinancialSummaryExt {
   const custoSetorMap = new Map<string, CustoSetorConfig>();
-  custosSetor.forEach(c => custoSetorMap.set(c.setor.toUpperCase(), c));
+  custosSetor.forEach((c) => custoSetorMap.set(c.setor.toUpperCase(), c));
 
-  const material = op.material || (apontamentos[0]?.material) || "PEBD VIRGEM";
-  const custoMpKg = getCustoMateriaPrimaKg(material, insumos);
+  const material = op.material || apontamentos[0]?.material || "PEBD VIRGEM";
+  const mp = resolveCustoMateriaPrima(material, insumos);
+  const custoMpKg = mp.valor;
 
   // Agrupa apontamentos por setor
   const setorMap = new Map<string, { kg: number; aparas: number; horas: number; datas: string[] }>();
   let aparasTotalKg = 0;
 
-  apontamentos.forEach(a => {
+  apontamentos.forEach((a) => {
     const s = (a.setor || "EXTRUSÃO").toUpperCase();
     if (!setorMap.has(s)) {
       setorMap.set(s, { kg: 0, aparas: 0, horas: 0, datas: [] });
@@ -179,36 +279,51 @@ export function computeOpFinancial(
   } else if (extrusaoData && extrusaoData.kg > 0) {
     quantidadeFinalKg = extrusaoData.kg;
   } else {
-    // Caso não haja apontamento específico, pega a soma total de kg apontados
     quantidadeFinalKg = Array.from(setorMap.values()).reduce((sum, item) => sum + item.kg, 0);
   }
 
-  // Matéria prima bruta consumida (inclui peso líquido gerado + refugo gerado na extrusão)
-  const pesoBrutoExtrusao = extrusaoData ? (extrusaoData.kg + extrusaoData.aparas) : (quantidadeFinalKg + aparasTotalKg);
+  // Resina total processada (produto bom + aparas)
+  const pesoBrutoExtrusao = extrusaoData
+    ? extrusaoData.kg + extrusaoData.aparas
+    : quantidadeFinalKg + aparasTotalKg;
   const totalMateriaPrimaKg = Math.max(pesoBrutoExtrusao, quantidadeFinalKg + aparasTotalKg);
-  let custoTotalMp = totalMateriaPrimaKg * custoMpKg;
 
-  // Se o produto é impresso, adiciona insumo de tinta flexográfica (~ R$ 1.30/kg impresso)
+  // CORREÇÃO (aparas contadas duas vezes):
+  // a resina das aparas é cobrada UMA vez, em "custo líquido das aparas" (abaixo,
+  // já descontada a recuperação). Aqui entra só a resina do produto bom.
+  const kgMpBoa = Math.max(totalMateriaPrimaKg - aparasTotalKg, 0);
+  let custoTotalMp = kgMpBoa * custoMpKg;
+
+  // Produto impresso: tinta, solvente e fotopolímero (estimativa fixa por kg impresso)
   const impressaoData = setorMap.get("IMPRESSÃO");
   if (impressaoData && impressaoData.kg > 0) {
-    custoTotalMp += impressaoData.kg * 1.35; // tintas, solventes, fotopolímeros
+    custoTotalMp += impressaoData.kg * CUSTO_TINTA_POR_KG_IMPRESSO;
   }
 
   // Custos operacionais por setor
   const detalheSetores: CustoSetorDetalhe[] = [];
   let custoTotalOperacional = 0;
+  let algumaHoraEstimada = false;
 
   setorMap.forEach((val, setorNome) => {
-    const conf = custoSetorMap.get(setorNome) || {
-      setor: setorNome as Sector,
-      custo_hora_maquina: 75,
-      custo_hora_homem: 35,
-      perda_padrao_tolerada_pct: 3,
-    };
+    const conf =
+      custoSetorMap.get(setorNome) ||
+      ({
+        setor: setorNome as Sector,
+        custo_hora_maquina: 75,
+        custo_hora_homem: 35,
+        perda_padrao_tolerada_pct: 3,
+      } as CustoSetorConfig);
 
-    // Horas: se apontadas > 0 usa apontadas, senão estima pela produtividade padrão
+    // Horas: usa as apontadas; senão estima pela produtividade padrão do setor
     const velocidade = VELOCIDADE_PADRAO_SETOR[setorNome] || 60;
-    const horasEstimadas = val.horas > 0 ? val.horas : (val.kg > 0 ? Math.round((val.kg / velocidade) * 10) / 10 : 0.5);
+    const horasApontadas = val.horas > 0;
+    if (!horasApontadas) algumaHoraEstimada = true;
+    const horasEstimadas = horasApontadas
+      ? val.horas
+      : val.kg > 0
+      ? Math.round((val.kg / velocidade) * 10) / 10
+      : 0.5;
 
     const custoMaq = Math.round(horasEstimadas * conf.custo_hora_maquina * 100) / 100;
     const custoHomem = Math.round(horasEstimadas * conf.custo_hora_homem * 100) / 100;
@@ -228,28 +343,34 @@ export function computeOpFinancial(
     });
   });
 
-  // Perdas / Aparas:
-  // Custo bruto das aparas = aparasTotalKg * custoMpKg
-  // Recuperação por moagem / venda de apara (~45% do valor da resina virgem recuperável)
+  // Aparas: custo bruto menos o que se recupera ao moer/vender
   const custoBrutoAparas = aparasTotalKg * custoMpKg;
-  const recuperacaoApara = custoBrutoAparas * 0.45;
+  const recuperacaoApara = custoBrutoAparas * RECUPERACAO_APARA;
   const custoLiquidoAparas = Math.max(0, custoBrutoAparas - recuperacaoApara);
 
-  // Custo Total de Fabricação
-  const custoTotalFabricacao = Math.round((custoTotalMp + custoTotalOperacional + custoLiquidoAparas) * 100) / 100;
+  // Custo total de fabricação
+  const custoTotalFabricacao =
+    Math.round((custoTotalMp + custoTotalOperacional + custoLiquidoAparas) * 100) / 100;
 
-  // Custo Real por Kg
-  const pesoBaseDivisao = quantidadeFinalKg > 0 ? quantidadeFinalKg : (totalMateriaPrimaKg > 0 ? totalMateriaPrimaKg : 1);
+  // Custo real por kg
+  const pesoBaseDivisao =
+    quantidadeFinalKg > 0 ? quantidadeFinalKg : totalMateriaPrimaKg > 0 ? totalMateriaPrimaKg : 1;
   const custoRealPorKg = Math.round((custoTotalFabricacao / pesoBaseDivisao) * 100) / 100;
 
-  // Preço de venda praticado: prioriza salvo em banco, senão sugerido
-  const precoVendaKg = savedPrices[op.id] || op.preco_venda_kg || getPrecoVendaSugerido(material);
-  const receitaTotal = Math.round((quantidadeFinalKg * precoVendaKg) * 100) / 100;
-  const lucroBruto = Math.round((receitaTotal - custoTotalFabricacao) * 100) / 100;
-  const margemLucroPct = receitaTotal > 0 ? Math.round(((lucroBruto / receitaTotal) * 100) * 10) / 10 : 0;
+  // Preço de venda: 1) salvo pelo usuário, 2) do pedido, 3) sugestão do sistema (ESTIMADO)
+  const precoSalvo = Number(savedPrices[op.id]) || 0;
+  const precoPedido = Number(op.preco_venda_kg) || 0;
+  const precoEstimado = precoSalvo <= 0 && precoPedido <= 0;
+  const precoVendaKg =
+    precoSalvo > 0 ? precoSalvo : precoPedido > 0 ? precoPedido : getPrecoVendaSugerido(material);
 
-  // Percentual de perda
-  const perdaRealPct = totalMateriaPrimaKg > 0 ? Math.round(((aparasTotalKg / totalMateriaPrimaKg) * 100) * 10) / 10 : 0;
+  const receitaTotal = Math.round(quantidadeFinalKg * precoVendaKg * 100) / 100;
+  const lucroBruto = Math.round((receitaTotal - custoTotalFabricacao) * 100) / 100;
+  const margemLucroPct =
+    receitaTotal > 0 ? Math.round((lucroBruto / receitaTotal) * 100 * 10) / 10 : 0;
+
+  const perdaRealPct =
+    totalMateriaPrimaKg > 0 ? Math.round((aparasTotalKg / totalMateriaPrimaKg) * 100 * 10) / 10 : 0;
 
   // Status de lucratividade
   let statusLucratividade: "ALTA" | "NORMAL" | "APERTADA" | "PREJUIZO" = "NORMAL";
@@ -263,11 +384,16 @@ export function computeOpFinancial(
     statusLucratividade = "PREJUIZO";
   }
 
-  // Datas
+  // Última data de produção
   const allDates: string[] = [];
-  setorMap.forEach(v => allDates.push(...v.datas));
+  setorMap.forEach((v) => allDates.push(...v.datas));
   allDates.sort();
   const dataUltima = allDates.length > 0 ? allDates[allDates.length - 1] : undefined;
+
+  // OP em andamento = margem provisória (a receita só conta o que já foi entregue,
+  // mas parte do custo já foi gasto).
+  const statusOp = (op.status_producao || "FINALIZADO").toUpperCase();
+  const parcial = statusOp !== "FINALIZADO";
 
   return {
     op_id: op.id,
@@ -291,67 +417,110 @@ export function computeOpFinancial(
     margem_lucro_pct: margemLucroPct,
     status_lucratividade: statusLucratividade,
     data_ultima_producao: dataUltima,
+    // avisos novos
+    preco_estimado: precoEstimado,
+    parcial,
+    custo_mp_estimado: mp.estimado,
+    horas_estimadas_flag: algumaHoraEstimada,
+    status_producao: op.status_producao,
   };
 }
 
-// Carrega todas as OPs com dados financeiros calculados
-export async function loadAllOpFinancials(): Promise<{
-  summaries: OpFinancialSummary[];
-  custosSetor: CustoSetorConfig[];
-  insumos: Insumo[];
-  totalReceita: number;
-  totalCusto: number;
-  totalLucro: number;
-  margemGeralPct: number;
-}> {
-  // 1. Carrega em paralelo: pedidos, apontamentos, custos, insumos, preços salvos
-  const [pedidosRes, apontamentosRes, custosSetor, insumos, savedPrices] = await Promise.all([
-    fetch(`${SUPABASE_URL}/rest/v1/pedidos_op?select=id,numero_op,cliente,descricao_item,material,quantidade_planejada_kg,status_producao&limit=2000`, {
-      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
-    }).then(r => (r.ok ? r.json() : [])),
+// ============================================================================
+// CARREGAMENTO DE TODAS AS OPs
+// ============================================================================
 
-    fetch(`${SUPABASE_URL}/rest/v1/apontamentos_producao?select=id,op_id,setor,maquina_id,qtd_produzida_kg,aparas_kg,picote_kg,horas_trabalhadas,material,cliente,descricao_item,data_producao&limit=3000`, {
-      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
-    }).then(r => (r.ok ? r.json() : [])),
+// Lê uma tabela inteira em blocos de 1000 (o Supabase corta respostas grandes).
+// Antes, as consultas usavam limit=2000/3000 sem paginar e podiam perder dados sem aviso.
+async function fetchAllRows<T>(path: string): Promise<T[]> {
+  const pageSize = 1000;
+  const out: T[] = [];
+
+  for (let page = 0; page < 200; page++) {
+    const from = page * pageSize;
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+        Range: `${from}-${from + pageSize - 1}`,
+        "Range-Unit": "items",
+      },
+      cache: "no-store",
+    });
+
+    if (res.status === 416) break; // passou do fim
+    if (!res.ok) throw new Error(`Falha ao ler ${path.split("?")[0]} (HTTP ${res.status}).`);
+
+    const batch = (await res.json()) as T[];
+    out.push(...batch);
+    if (batch.length < pageSize) break;
+  }
+
+  return out;
+}
+
+function totaisDe(list: OpFinancialSummaryExt[]): TotaisFinanceiros {
+  const totalReceita = list.reduce((acc, item) => acc + item.receita_total, 0);
+  const totalCusto = list.reduce((acc, item) => acc + item.custo_total_fabricacao, 0);
+  const totalLucro = totalReceita - totalCusto;
+  const margemPct = totalReceita > 0 ? Math.round((totalLucro / totalReceita) * 100 * 10) / 10 : 0;
+  return { quantidade: list.length, totalReceita, totalCusto, totalLucro, margemPct };
+}
+
+export async function loadAllOpFinancials(): Promise<LoadAllOpFinancialsResult> {
+  const avisos: string[] = [];
+
+  // Pedidos: select=* para funcionar com ou sem a coluna preco_venda_kg.
+  // Apontamentos: mesmas colunas de antes.
+  const [pedidos, apontamentos, custosSetor, insumos, savedPrices] = await Promise.all([
+    fetchAllRows<PedidoOpRaw>("pedidos_op?select=*&order=id.asc").catch((err) => {
+      console.error("[financialEngine] pedidos_op:", err);
+      avisos.push("Não foi possível carregar os pedidos (pedidos_op). Os dados abaixo podem estar incompletos.");
+      return [] as PedidoOpRaw[];
+    }),
+
+    fetchAllRows<ApontamentoRaw>(
+      "apontamentos_producao?select=id,op_id,setor,maquina_id,qtd_produzida_kg,aparas_kg,picote_kg,horas_trabalhadas,material,cliente,descricao_item,data_producao&order=id.asc"
+    ).catch((err) => {
+      console.error("[financialEngine] apontamentos_producao:", err);
+      avisos.push("Não foi possível carregar os apontamentos de produção. Os custos abaixo podem estar incompletos.");
+      return [] as ApontamentoRaw[];
+    }),
 
     loadCustosSetor().catch(() => DEFAULT_CUSTOS_SETORES),
-    loadInsumos().catch(() => []),
-    loadSavedPricing().catch(() => ({})),
+    loadInsumos().catch(() => [] as Insumo[]),
+
+    readStorageJson<Record<string, number>>(PRICING_KEY)
+      .then((v) => v ?? {})
+      .catch((err) => {
+        console.error("[financialEngine] preços salvos:", err);
+        avisos.push("Não foi possível ler os preços de venda salvos; todos aparecem como estimados.");
+        return {} as Record<string, number>;
+      }),
   ]);
 
-  const pedidos = (pedidosRes || []) as PedidoOpRaw[];
-  const apontamentos = (apontamentosRes || []) as ApontamentoRaw[];
+  if (getDataSourceFlags().custosSetorPadrao) {
+    avisos.push("As taxas por setor ainda são os valores padrão do sistema; custo de máquina e mão de obra são estimativas.");
+  }
 
-  // Agrupa apontamentos por op_id
+  // Agrupa apontamentos por OP
   const apontamentosByOp = new Map<string, ApontamentoRaw[]>();
-  apontamentos.forEach(a => {
+  apontamentos.forEach((a) => {
     if (!a.op_id) return;
-    if (!apontamentosByOp.has(a.op_id)) {
-      apontamentosByOp.set(a.op_id, []);
-    }
+    if (!apontamentosByOp.has(a.op_id)) apontamentosByOp.set(a.op_id, []);
     apontamentosByOp.get(a.op_id)!.push(a);
   });
 
-  // Cria mapa de pedidos por id
   const pedidoMap = new Map<string, PedidoOpRaw>();
-  pedidos.forEach(p => pedidoMap.set(p.id, p));
+  pedidos.forEach((p) => pedidoMap.set(p.id, p));
 
-  // Coleta todas as OPs que possuem apontamentos OU estão cadastradas como pedidos
-  const uniqueOpIds = new Set<string>();
-  apontamentosByOp.forEach((_, opId) => uniqueOpIds.add(opId));
-  pedidos.forEach(p => {
-    if (apontamentosByOp.has(p.id)) {
-      uniqueOpIds.add(p.id);
-    }
-  });
+  const summaries: OpFinancialSummaryExt[] = [];
 
-  const summaries: OpFinancialSummary[] = [];
-
-  uniqueOpIds.forEach(opId => {
-    const apts = apontamentosByOp.get(opId) || [];
+  apontamentosByOp.forEach((apts, opId) => {
     const firstApt = apts[0];
 
-    const pedido = pedidoMap.get(opId) || {
+    // Se não há cadastro do pedido, usa os dados do próprio apontamento.
+    const pedido: PedidoOpRaw = pedidoMap.get(opId) || {
       id: opId,
       cliente: firstApt?.cliente || "Cliente Industrial",
       descricao_item: firstApt?.descricao_item || "Item Plástico",
@@ -361,33 +530,42 @@ export async function loadAllOpFinancials(): Promise<{
     };
 
     const fin = computeOpFinancial(pedido, apts, custosSetor, insumos, savedPrices);
-    // Apenas inclui se houve alguma produção ou apontamento
     if (fin.quantidade_final_kg > 0 || fin.custo_total_fabricacao > 0) {
       summaries.push(fin);
     }
   });
 
-  // Ordena por OP decrescente (mais recentes primeiro)
+  // Ordem: produção mais recente primeiro; empate pelo número da OP.
+  // (O comparador antigo misturava números e textos e podia gerar ordem instável.)
   summaries.sort((a, b) => {
-    const numA = parseInt(a.op_id, 10);
-    const numB = parseInt(b.op_id, 10);
-    if (!isNaN(numA) && !isNaN(numB)) return numB - numA;
-    return b.op_id.localeCompare(a.op_id);
+    const da = a.data_ultima_producao ?? "";
+    const db = b.data_ultima_producao ?? "";
+    if (da !== db) return db.localeCompare(da);
+    return b.op_id.localeCompare(a.op_id, undefined, { numeric: true });
   });
 
-  // Totais agregados
-  const totalReceita = summaries.reduce((acc, item) => acc + item.receita_total, 0);
-  const totalCusto = summaries.reduce((acc, item) => acc + item.custo_total_fabricacao, 0);
-  const totalLucro = totalReceita - totalCusto;
-  const margemGeralPct = totalReceita > 0 ? Math.round(((totalLucro / totalReceita) * 100) * 10) / 10 : 0;
+  const todas = totaisDe(summaries);
+  const finalizadas = totaisDe(summaries.filter((s) => !s.parcial));
+  const quantidadeParciais = summaries.filter((s) => s.parcial).length;
+  const quantidadePrecoEstimado = summaries.filter((s) => s.preco_estimado).length;
+
+  if (quantidadePrecoEstimado > 0) {
+    avisos.push(
+      `${quantidadePrecoEstimado} de ${summaries.length} OPs usam preço de venda estimado; faturamento e margem são aproximados.`
+    );
+  }
 
   return {
     summaries,
     custosSetor,
     insumos,
-    totalReceita,
-    totalCusto,
-    totalLucro,
-    margemGeralPct,
+    totalReceita: todas.totalReceita,
+    totalCusto: todas.totalCusto,
+    totalLucro: todas.totalLucro,
+    margemGeralPct: todas.margemPct,
+    finalizadas,
+    quantidadeParciais,
+    quantidadePrecoEstimado,
+    avisos,
   };
 }
