@@ -13,88 +13,339 @@ import {
   PaleteRomaneio,
 } from "../types/forpack";
 
-export const SUPABASE_URL = "https://gbgmvqbxozzcloynwdbo.supabase.co";
-export const SUPABASE_KEY = "sb_publishable_5W3m26faz-Jhr8j42B5_Lg_t4EV6rSy";
+// ============================================================================
+// CONEXÃO
+// ============================================================================
+// Se existirem as variáveis VITE_SUPABASE_URL / VITE_SUPABASE_KEY (Vercel ou .env),
+// elas têm prioridade. Caso contrário, usa os valores abaixo (iguais aos atuais).
 
-/**
- * Carrega todos os registros de app_storage com paginação automática (chunks de 1000)
- * para nunca cortar dados acumulados (como ocorria no limite padrão de 1000).
- */
-export async function loadRows(): Promise<StorageRow[]> {
-  const allRows: StorageRow[] = [];
-  const pageSize = 1000;
-  let from = 0;
-  let hasMore = true;
+const ENV =
+  ((import.meta as unknown) as { env?: Record<string, string | undefined> }).env ?? {};
 
-  while (hasMore) {
-    const to = from + pageSize - 1;
-    const response = await fetch(
-      `${SUPABASE_URL}/rest/v1/app_storage?select=key,value,updated_at&order=key.asc`,
-      {
-        headers: {
-          apikey: SUPABASE_KEY,
-          Authorization: `Bearer ${SUPABASE_KEY}`,
-          Range: `${from}-${to}`,
-          "Range-Unit": "items",
-        },
-        cache: "no-store",
-      }
-    );
+export const SUPABASE_URL = ENV.VITE_SUPABASE_URL || "https://gbgmvqbxozzcloynwdbo.supabase.co";
+export const SUPABASE_KEY = ENV.VITE_SUPABASE_KEY || "sb_publishable_5W3m26faz-Jhr8j42B5_Lg_t4EV6rSy";
 
-    if (!response.ok) {
-      // Se houver erro de Range não satisfatível (416), significa que chegamos ao fim
-      if (response.status === 416) {
-        break;
-      }
-      throw new Error("Não foi possível carregar os dados do painel do Supabase.");
-    }
+const REST = `${SUPABASE_URL}/rest/v1/`;
+const TIMEOUT_MS = 30000;
 
-    const batch = (await response.json()) as StorageRow[];
-    allRows.push(...batch);
+// ----------------------------------------------------------------------------
+// Preparação para o login (etapa seguinte): quando existir uma sessão, o app
+// chama setAccessTokenProvider(() => token) e todas as chamadas passam a usar
+// o token do usuário no lugar da chave pública. Hoje não muda nada.
+// ----------------------------------------------------------------------------
+let accessTokenProvider: (() => string | null) | null = null;
 
-    if (batch.length < pageSize) {
-      hasMore = false;
-    } else {
-      from += pageSize;
-    }
-  }
-
-  return allRows;
+export function setAccessTokenProvider(fn: (() => string | null) | null): void {
+  accessTokenProvider = fn;
 }
 
-export async function saveOrder(order: Order, updatedAt?: string): Promise<void> {
-  const key = `pedido:${order.id}`;
-  if (updatedAt) {
-    const endpoint = `${SUPABASE_URL}/rest/v1/app_storage?key=eq.${encodeURIComponent(key)}&updated_at=eq.${encodeURIComponent(updatedAt)}&select=key,value,updated_at`;
-    const response = await fetch(endpoint, {
-      method: "PATCH",
-      headers: {
-        apikey: SUPABASE_KEY,
-        Authorization: `Bearer ${SUPABASE_KEY}`,
-        "Content-Type": "application/json",
-        Prefer: "return=representation",
-      },
-      body: JSON.stringify({ value: JSON.stringify(order), updated_at: new Date().toISOString() }),
+// ============================================================================
+// ERROS E AVISOS (para a tela poder mostrar um aviso em vez de "lista vazia")
+// ============================================================================
+
+export class ApiError extends Error {
+  status: number;
+  detalhe?: string;
+  constructor(message: string, status = 0, detalhe?: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.detalhe = detalhe;
+  }
+}
+
+export class ConflictError extends Error {
+  constructor(message = "Este registro foi alterado por outra pessoa. Atualize a tela e tente de novo.") {
+    super(message);
+    this.name = "ConflictError";
+  }
+}
+
+export interface ApiErrorInfo {
+  contexto: string;
+  mensagem: string;
+  status?: number;
+  quando: string;
+}
+
+const errorListeners = new Set<(info: ApiErrorInfo) => void>();
+
+/** A tela se inscreve aqui para exibir um aviso quando uma leitura falhar. */
+export function onApiError(cb: (info: ApiErrorInfo) => void): () => void {
+  errorListeners.add(cb);
+  return () => {
+    errorListeners.delete(cb);
+  };
+}
+
+function reportApiError(contexto: string, err: unknown): void {
+  const mensagem = err instanceof Error ? err.message : String(err);
+  const status = err instanceof ApiError ? err.status : undefined;
+  console.error(`[supabaseApi] ${contexto}:`, err);
+  const info: ApiErrorInfo = { contexto, mensagem, status, quando: new Date().toISOString() };
+  errorListeners.forEach((cb) => {
+    try {
+      cb(info);
+    } catch {
+      /* um ouvinte com erro não pode derrubar os outros */
+    }
+  });
+}
+
+// Indica se os dados exibidos são os "padrão" do código (não vieram do banco).
+const dataSourceFlags = { custosSetorPadrao: false, fichasTecnicasPadrao: false };
+
+export function getDataSourceFlags(): { custosSetorPadrao: boolean; fichasTecnicasPadrao: boolean } {
+  return { ...dataSourceFlags };
+}
+
+// ============================================================================
+// CONFLITO DE EDIÇÃO
+// ============================================================================
+// "overwrite" = comportamento de hoje (se alguém alterou antes, grava por cima,
+//               mas avisa pelo campo `conflict` do retorno).
+// "strict"    = não grava por cima: lança ConflictError. Só ligar depois que as
+//               telas atualizarem o updatedAt após cada salvamento.
+
+export type ConflictMode = "overwrite" | "strict";
+let conflictMode: ConflictMode = "overwrite";
+
+export function setConflictMode(mode: ConflictMode): void {
+  conflictMode = mode;
+}
+
+export interface WriteResult {
+  updatedAt: string;
+  conflict: boolean;
+}
+
+// ============================================================================
+// NÚCLEO: UMA ÚNICA FORMA DE FALAR COM O BANCO
+// ============================================================================
+
+interface RestOptions {
+  method?: string;
+  body?: unknown;
+  prefer?: string;
+  headers?: Record<string, string>;
+}
+
+function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  const token = accessTokenProvider?.() || SUPABASE_KEY;
+  return { apikey: SUPABASE_KEY, Authorization: `Bearer ${token}`, ...extra };
+}
+
+async function rest(path: string, opts: RestOptions = {}): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  try {
+    return await fetch(REST + path, {
+      method: opts.method ?? "GET",
+      headers: authHeaders({
+        ...(opts.body !== undefined ? { "Content-Type": "application/json" } : {}),
+        ...(opts.prefer ? { Prefer: opts.prefer } : {}),
+        ...(opts.headers ?? {}),
+      }),
+      body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+      cache: "no-store",
+      signal: controller.signal,
     });
-    if (response.ok) {
-      const changed = (await response.json()) as StorageRow[];
-      if (changed.length > 0) return;
+  } catch (err) {
+    const aborted = err instanceof DOMException && err.name === "AbortError";
+    throw new ApiError(
+      aborted ? "O servidor demorou demais para responder." : "Sem conexão com o servidor.",
+      0
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function failure(res: Response, message: string): Promise<ApiError> {
+  let detalhe = "";
+  try {
+    detalhe = (await res.text()).slice(0, 300);
+  } catch {
+    /* sem detalhe */
+  }
+  return new ApiError(message, res.status, detalhe);
+}
+
+async function rows<T>(res: Response): Promise<T[]> {
+  const data = await res.json();
+  return Array.isArray(data) ? (data as T[]) : [];
+}
+
+// ============================================================================
+// app_storage (tabela chave/valor usada por pedidos, produção, cadastros etc.)
+// ============================================================================
+
+const STORAGE = "app_storage";
+const STORAGE_COLS = "key,value,updated_at";
+const keyEq = (key: string) => `key=eq.${encodeURIComponent(key)}`;
+
+interface RawRow {
+  key: string;
+  value: string;
+  updated_at?: string;
+}
+
+async function readStorageRow(key: string): Promise<RawRow | null> {
+  const res = await rest(`${STORAGE}?${keyEq(key)}&select=${STORAGE_COLS}`);
+  if (!res.ok) throw await failure(res, "Não foi possível ler o registro.");
+  const found = await rows<RawRow>(res);
+  return found[0] ?? null;
+}
+
+/** Lê e converte o JSON guardado numa chave. Retorna null se a chave não existe. */
+export async function readStorageJson<T>(key: string): Promise<T | null> {
+  const row = await readStorageRow(key);
+  if (!row || !row.value) return null;
+  try {
+    return JSON.parse(row.value) as T;
+  } catch {
+    throw new ApiError("O dado salvo está corrompido.", 0, key);
+  }
+}
+
+/**
+ * Grava um valor numa chave de app_storage.
+ *  1) se veio `expectedUpdatedAt`, tenta gravar só se ninguém mexeu desde então;
+ *  2) senão (ou se falhou) altera pela chave;
+ *  3) se a chave ainda não existe, cria.
+ * Antes, o passo 2 podia "dar certo" sem gravar nada quando a chave não existia.
+ */
+async function writeStorage(
+  key: string,
+  payload: unknown,
+  expectedUpdatedAt: string | undefined,
+  failMessage: string
+): Promise<WriteResult> {
+  const now = new Date().toISOString();
+  const body = { value: JSON.stringify(payload), updated_at: now };
+
+  async function patch(extraFilter = ""): Promise<RawRow[]> {
+    const res = await rest(`${STORAGE}?${keyEq(key)}${extraFilter}&select=${STORAGE_COLS}`, {
+      method: "PATCH",
+      body,
+      prefer: "return=representation",
+    });
+    if (!res.ok) throw await failure(res, failMessage);
+    return rows<RawRow>(res);
+  }
+
+  if (expectedUpdatedAt) {
+    const guarded = await patch(`&updated_at=eq.${encodeURIComponent(expectedUpdatedAt)}`);
+    if (guarded.length > 0) {
+      return { updatedAt: guarded[0].updated_at ?? now, conflict: false };
+    }
+    if (conflictMode === "strict") {
+      const current = await readStorageRow(key);
+      if (current) throw new ConflictError();
     }
   }
 
-  // Fallback direct patch by key to guarantee update even if updated_at timestamp drifted
-  const fallbackEndpoint = `${SUPABASE_URL}/rest/v1/app_storage?key=eq.${encodeURIComponent(key)}&select=key,value,updated_at`;
-  const fallbackResponse = await fetch(fallbackEndpoint, {
-    method: "PATCH",
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
-      "Content-Type": "application/json",
-      Prefer: "return=representation",
-    },
-    body: JSON.stringify({ value: JSON.stringify(order), updated_at: new Date().toISOString() }),
+  const direct = await patch();
+  if (direct.length > 0) {
+    const conflict = Boolean(expectedUpdatedAt);
+    if (conflict) {
+      console.warn(`[supabaseApi] "${key}" tinha sido alterado por outra pessoa; a versão atual foi gravada por cima.`);
+    }
+    return { updatedAt: direct[0].updated_at ?? now, conflict };
+  }
+
+  // A chave ainda não existe: cria.
+  const res = await rest(`${STORAGE}?on_conflict=key&select=${STORAGE_COLS}`, {
+    method: "POST",
+    body: { key, ...body },
+    prefer: "resolution=merge-duplicates,return=representation",
   });
-  if (!fallbackResponse.ok) throw new Error("Não foi possível salvar a programação.");
+  if (!res.ok) throw await failure(res, failMessage);
+  const created = await rows<RawRow>(res);
+  return { updatedAt: created[0]?.updated_at ?? now, conflict: false };
+}
+
+async function insertStorage(key: string, payload: unknown, failMessage: string): Promise<void> {
+  const res = await rest(`${STORAGE}?select=${STORAGE_COLS}`, {
+    method: "POST",
+    body: { key, value: JSON.stringify(payload), updated_at: new Date().toISOString() },
+    prefer: "return=representation",
+  });
+  if (!res.ok) throw await failure(res, failMessage);
+}
+
+async function deleteStorage(key: string, failMessage: string): Promise<void> {
+  const res = await rest(`${STORAGE}?${keyEq(key)}`, { method: "DELETE" });
+  if (!res.ok) throw await failure(res, failMessage);
+}
+
+// ============================================================================
+// CARREGAMENTO
+// ============================================================================
+
+export interface LoadRowsOptions {
+  /** Só chaves que começam com isto (ex.: "pedido:" ou "record:2026-10-"). */
+  prefix?: string;
+  /**
+   * Traz tudo, exceto lançamentos de produção ("record:") anteriores a esta data
+   * (formato AAAA-MM-DD). Serve para não baixar o histórico inteiro a cada abertura.
+   */
+  excludeRecordsBefore?: string;
+}
+
+/**
+ * Carrega registros de app_storage com paginação automática (blocos de 1000).
+ * Sem opções, o comportamento é idêntico ao anterior (carrega tudo).
+ */
+export async function loadRows(options: LoadRowsOptions = {}): Promise<StorageRow[]> {
+  let filters = "";
+  if (options.prefix) {
+    filters += `&key=like.${encodeURIComponent(options.prefix)}*`;
+  }
+  if (options.excludeRecordsBefore) {
+    filters += `&or=(key.not.like.record:*,key.gte.record:${options.excludeRecordsBefore})`;
+  }
+
+  const all: StorageRow[] = [];
+  const pageSize = 1000;
+
+  for (let page = 0; page < 500; page++) {
+    const from = page * pageSize;
+    const to = from + pageSize - 1;
+    const res = await rest(`${STORAGE}?select=${STORAGE_COLS}&order=key.asc${filters}`, {
+      headers: { Range: `${from}-${to}`, "Range-Unit": "items" },
+    });
+
+    if (res.status === 416) break; // passou do fim
+    if (!res.ok) throw await failure(res, "Não foi possível carregar os dados do painel do Supabase.");
+
+    const batch = await rows<StorageRow>(res);
+    all.push(...batch);
+    if (batch.length < pageSize) break;
+  }
+
+  return all;
+}
+
+/** Tudo, exceto lançamentos de produção com mais de `meses` meses. */
+export async function loadRowsRecentes(meses = 3): Promise<StorageRow[]> {
+  const now = new Date();
+  const corte = new Date(now.getFullYear(), now.getMonth() - meses, 1);
+  const iso = `${corte.getFullYear()}-${String(corte.getMonth() + 1).padStart(2, "0")}-01`;
+  return loadRows({ excludeRecordsBefore: iso });
+}
+
+/** Lançamentos de produção de um mês específico (formato "AAAA-MM"). */
+export async function loadRecordsDoMes(mes: string): Promise<StorageRow[]> {
+  return loadRows({ prefix: `record:${mes}-` });
+}
+
+// ============================================================================
+// PEDIDOS, PRODUÇÃO E CADASTROS
+// ============================================================================
+
+export async function saveOrder(order: Order, updatedAt?: string): Promise<WriteResult> {
+  return writeStorage(`pedido:${order.id}`, order, updatedAt, "Não foi possível salvar a programação.");
 }
 
 export async function createOrder(input: Omit<Order, "id">): Promise<Order> {
@@ -108,19 +359,16 @@ export async function createOrder(input: Omit<Order, "id">): Promise<Order> {
     maquinaId: "",
     prioridade: 0,
   };
-  const response = await fetch(`${SUPABASE_URL}/rest/v1/app_storage?select=key,value,updated_at`, {
+
+  const res = await rest(`${STORAGE}?select=${STORAGE_COLS}`, {
     method: "POST",
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
-      "Content-Type": "application/json",
-      Prefer: "return=representation",
-    },
-    body: JSON.stringify({ key: `pedido:${id}`, value: JSON.stringify(order), updated_at: new Date().toISOString() }),
+    body: { key: `pedido:${id}`, value: JSON.stringify(order), updated_at: new Date().toISOString() },
+    prefer: "return=representation",
   });
-  if (!response.ok) {
-    throw new Error(
-      response.status === 409
+  if (!res.ok) {
+    throw await failure(
+      res,
+      res.status === 409
         ? "Já existe um pedido com este identificador. Tente novamente."
         : "Não foi possível cadastrar o pedido."
     );
@@ -129,7 +377,11 @@ export async function createOrder(input: Omit<Order, "id">): Promise<Order> {
 }
 
 export async function saveProduction(order: Order, machine: Machine, input: Production): Promise<void> {
-  const id = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const id =
+    typeof crypto !== "undefined" && crypto.randomUUID
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
   const record = {
     id,
     idPedido: order.id,
@@ -146,188 +398,68 @@ export async function saveProduction(order: Order, machine: Machine, input: Prod
     quantidadePedido: order.quantidade,
     material: order.material || "",
   };
-  const key = `record:${input.dataProducao}:${id}`;
-  const response = await fetch(`${SUPABASE_URL}/rest/v1/app_storage?select=key,value,updated_at`, {
-    method: "POST",
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
-      "Content-Type": "application/json",
-      Prefer: "return=representation",
-    },
-    body: JSON.stringify({ key, value: JSON.stringify(record), updated_at: new Date().toISOString() }),
-  });
-  if (!response.ok) throw new Error("Não foi possível registrar a produção.");
+
+  await insertStorage(`record:${input.dataProducao}:${id}`, record, "Não foi possível registrar a produção.");
 }
 
-export async function updateProduction(record: Production): Promise<void> {
+export async function updateProduction(record: Production): Promise<WriteResult> {
   if (!record._key) throw new Error("Não foi possível identificar este apontamento.");
   const { _key, _updatedAt, ...stored } = record;
-  if (_updatedAt) {
-    const endpoint = `${SUPABASE_URL}/rest/v1/app_storage?key=eq.${encodeURIComponent(_key)}&updated_at=eq.${encodeURIComponent(_updatedAt)}&select=key,value,updated_at`;
-    const response = await fetch(endpoint, {
-      method: "PATCH",
-      headers: {
-        apikey: SUPABASE_KEY,
-        Authorization: `Bearer ${SUPABASE_KEY}`,
-        "Content-Type": "application/json",
-        Prefer: "return=representation",
-      },
-      body: JSON.stringify({ value: JSON.stringify(stored), updated_at: new Date().toISOString() }),
-    });
-    if (response.ok) {
-      const changed = (await response.json()) as StorageRow[];
-      if (changed.length > 0) return;
-    }
-  }
-
-  // Fallback by key
-  const fallbackEndpoint = `${SUPABASE_URL}/rest/v1/app_storage?key=eq.${encodeURIComponent(_key)}&select=key,value,updated_at`;
-  const fallbackResponse = await fetch(fallbackEndpoint, {
-    method: "PATCH",
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
-      "Content-Type": "application/json",
-      Prefer: "return=representation",
-    },
-    body: JSON.stringify({ value: JSON.stringify(stored), updated_at: new Date().toISOString() }),
-  });
-  if (!fallbackResponse.ok) throw new Error("Não foi possível atualizar o apontamento.");
+  return writeStorage(_key, stored, _updatedAt, "Não foi possível atualizar o apontamento.");
 }
 
-export async function saveRegistry(kind: RegistryKind, values: string[], updatedAt?: string): Promise<void> {
-  const key = `config:${kind}`;
-  if (updatedAt) {
-    const endpoint = `${SUPABASE_URL}/rest/v1/app_storage?key=eq.${encodeURIComponent(key)}&updated_at=eq.${encodeURIComponent(updatedAt)}&select=key,value,updated_at`;
-    const response = await fetch(endpoint, {
-      method: "PATCH",
-      headers: {
-        apikey: SUPABASE_KEY,
-        Authorization: `Bearer ${SUPABASE_KEY}`,
-        "Content-Type": "application/json",
-        Prefer: "return=representation",
-      },
-      body: JSON.stringify({ value: JSON.stringify(values), updated_at: new Date().toISOString() }),
-    });
-    if (response.ok) {
-      const changed = (await response.json()) as StorageRow[];
-      if (changed.length > 0) return;
-    }
-  }
-
-  // Fallback PATCH by key
-  const fallbackEndpoint = `${SUPABASE_URL}/rest/v1/app_storage?key=eq.${encodeURIComponent(key)}&select=key,value,updated_at`;
-  const fallbackResponse = await fetch(fallbackEndpoint, {
-    method: "PATCH",
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
-      "Content-Type": "application/json",
-      Prefer: "return=representation",
-    },
-    body: JSON.stringify({ value: JSON.stringify(values), updated_at: new Date().toISOString() }),
-  });
-  if (fallbackResponse.ok) {
-    const changed = (await fallbackResponse.json()) as StorageRow[];
-    if (changed.length > 0) return;
-  }
-
-  // If key does not exist yet, insert with upsert
-  const insertResponse = await fetch(`${SUPABASE_URL}/rest/v1/app_storage?select=key,value,updated_at`, {
-    method: "POST",
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
-      "Content-Type": "application/json",
-      Prefer: "resolution=merge-duplicates,return=representation",
-    },
-    body: JSON.stringify({ key, value: JSON.stringify(values), updated_at: new Date().toISOString() }),
-  });
-  if (!insertResponse.ok) throw new Error("Não foi possível salvar o cadastro.");
+export async function saveRegistry(kind: RegistryKind, values: string[], updatedAt?: string): Promise<WriteResult> {
+  return writeStorage(`config:${kind}`, values, updatedAt, "Não foi possível salvar o cadastro.");
 }
 
 // ============================================================================
-// ETAPA 2: GESTÃO DE INSUMOS (MATÉRIAS-PRIMAS E SUPRIMENTOS)
+// GESTÃO DE INSUMOS (MATÉRIAS-PRIMAS E SUPRIMENTOS)
 // ============================================================================
 
+/**
+ * Antes, se a tabela falhasse ou estivesse vazia, o sistema mostrava uma lista
+ * de exemplo (com estoques inventados). Agora devolve lista vazia e avisa o erro.
+ */
 export async function loadInsumos(): Promise<Insumo[]> {
   try {
-    const response = await fetch(
-      `${SUPABASE_URL}/rest/v1/insumos?select=*&order=categoria.asc,nome.asc`,
-      {
-        headers: {
-          apikey: SUPABASE_KEY,
-          Authorization: `Bearer ${SUPABASE_KEY}`,
-        },
-        cache: "no-store",
-      }
-    );
-
-    if (!response.ok) {
-      // Fallback para storage caso tabela não esteja acessível
-      return loadInsumosFromStorage();
-    }
-
-    const data = (await response.json()) as Insumo[];
-    if (data.length === 0) {
-      return loadInsumosFromStorage();
-    }
-    return data;
+    const res = await rest("insumos?select=*&order=categoria.asc,nome.asc");
+    if (!res.ok) throw await failure(res, "Não foi possível carregar os insumos.");
+    return await rows<Insumo>(res);
   } catch (err) {
-    console.warn("Erro ao buscar insumos no banco, usando fallback local:", err);
-    return loadInsumosFromStorage();
+    reportApiError("loadInsumos", err);
+    return [];
   }
 }
 
 export async function saveInsumo(insumo: Partial<Insumo>): Promise<Insumo> {
   const isNew = !insumo.id;
-  const url = isNew
-    ? `${SUPABASE_URL}/rest/v1/insumos?select=*`
-    : `${SUPABASE_URL}/rest/v1/insumos?id=eq.${encodeURIComponent(insumo.id!)}&select=*`;
+  const path = isNew
+    ? "insumos?select=*"
+    : `insumos?id=eq.${encodeURIComponent(insumo.id!)}&select=*`;
 
-  const method = isNew ? "POST" : "PATCH";
-  const body = {
-    ...insumo,
-    updated_at: new Date().toISOString(),
-  };
-
-  const response = await fetch(url, {
-    method,
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
-      "Content-Type": "application/json",
-      Prefer: "return=representation",
-    },
-    body: JSON.stringify(body),
+  const res = await rest(path, {
+    method: isNew ? "POST" : "PATCH",
+    body: { ...insumo, updated_at: new Date().toISOString() },
+    prefer: "return=representation",
   });
+  if (!res.ok) throw await failure(res, "Não foi possível salvar o insumo no banco de dados.");
 
-  if (!response.ok) {
-    throw new Error("Não foi possível salvar o insumo no banco de dados.");
-  }
-
-  const result = (await response.json()) as Insumo[];
+  const result = await rows<Insumo>(res);
+  if (!result[0]) throw new ApiError("O insumo não foi encontrado para atualização.", 404);
   return result[0];
 }
 
 export async function deleteInsumo(id: string): Promise<void> {
-  const response = await fetch(`${SUPABASE_URL}/rest/v1/insumos?id=eq.${encodeURIComponent(id)}`, {
-    method: "DELETE",
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
-    },
-  });
-
-  if (!response.ok) {
-    throw new Error("Não foi possível excluir o insumo.");
-  }
+  const res = await rest(`insumos?id=eq.${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (!res.ok) throw await failure(res, "Não foi possível excluir o insumo.");
 }
 
 // ============================================================================
-// ETAPA 2: CONFIGURAÇÃO DE CUSTOS POR SETOR (FORPACK)
+// CUSTOS POR SETOR
 // ============================================================================
+// ATENÇÃO: estes valores são apenas um PADRÃO do código. Se a tabela
+// custos_setor_config estiver vazia ou der erro, o sistema usa estes números.
+// Use getDataSourceFlags().custosSetorPadrao para avisar isso na tela.
 
 export const DEFAULT_CUSTOS_SETORES: CustoSetorConfig[] = [
   { setor: "EXTRUSÃO", custo_hora_maquina: 120.0, custo_hora_homem: 35.0, perda_padrao_tolerada_pct: 3.5 },
@@ -339,58 +471,39 @@ export const DEFAULT_CUSTOS_SETORES: CustoSetorConfig[] = [
 
 export async function loadCustosSetor(): Promise<CustoSetorConfig[]> {
   try {
-    const response = await fetch(
-      `${SUPABASE_URL}/rest/v1/custos_setor_config?select=*&order=setor.asc`,
-      {
-        headers: {
-          apikey: SUPABASE_KEY,
-          Authorization: `Bearer ${SUPABASE_KEY}`,
-        },
-        cache: "no-store",
-      }
-    );
-
-    if (!response.ok) {
-      return DEFAULT_CUSTOS_SETORES;
-    }
-
-    const data = (await response.json()) as CustoSetorConfig[];
+    const res = await rest("custos_setor_config?select=*&order=setor.asc");
+    if (!res.ok) throw await failure(res, "Não foi possível carregar os custos por setor.");
+    const data = await rows<CustoSetorConfig>(res);
     if (data.length === 0) {
+      dataSourceFlags.custosSetorPadrao = true;
       return DEFAULT_CUSTOS_SETORES;
     }
+    dataSourceFlags.custosSetorPadrao = false;
     return data;
   } catch (err) {
-    console.warn("Erro ao buscar custos de setor, usando padrão:", err);
+    reportApiError("loadCustosSetor", err);
+    dataSourceFlags.custosSetorPadrao = true;
     return DEFAULT_CUSTOS_SETORES;
   }
 }
 
 export async function saveCustoSetor(item: CustoSetorConfig): Promise<void> {
-  const url = `${SUPABASE_URL}/rest/v1/custos_setor_config?select=*`;
-  const response = await fetch(url, {
+  const res = await rest("custos_setor_config?select=*", {
     method: "POST",
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
-      "Content-Type": "application/json",
-      Prefer: "resolution=merge-duplicates,return=representation",
-    },
-    body: JSON.stringify({
+    body: {
       setor: item.setor,
       custo_hora_maquina: Number(item.custo_hora_maquina) || 0,
       custo_hora_homem: Number(item.custo_hora_homem) || 0,
       perda_padrao_tolerada_pct: Number(item.perda_padrao_tolerada_pct) || 0,
       updated_at: new Date().toISOString(),
-    }),
+    },
+    prefer: "resolution=merge-duplicates,return=representation",
   });
-
-  if (!response.ok) {
-    throw new Error("Não foi possível atualizar o custo do setor.");
-  }
+  if (!res.ok) throw await failure(res, "Não foi possível atualizar o custo do setor.");
 }
 
 // ============================================================================
-// ETAPA 2: FICHAS TÉCNICAS E ESTRUTURA DE PRODUTOS
+// FICHAS TÉCNICAS E ESTRUTURA DE PRODUTOS
 // ============================================================================
 
 export const DEFAULT_FICHAS_TECNICAS: FichaTecnica[] = [
@@ -401,7 +514,7 @@ export const DEFAULT_FICHAS_TECNICAS: FichaTecnica[] = [
     setoresProcesso: ["EXTRUSÃO", "CORTE"],
     composicao: [
       { insumo_nome: "Resina PEBD", proporcao_percentual: 97, custo_estimado_kg: 7.85 },
-      { insumo_nome: "Masterbatch Branco", proporcao_percentual: 3, custo_estimado_kg: 14.50 },
+      { insumo_nome: "Masterbatch Branco", proporcao_percentual: 3, custo_estimado_kg: 14.5 },
     ],
     perdaEstimadaPct: 3.0,
     velocidadeMediaKgHora: 45,
@@ -414,8 +527,8 @@ export const DEFAULT_FICHAS_TECNICAS: FichaTecnica[] = [
     setoresProcesso: ["EXTRUSÃO", "IMPRESSÃO", "CORTE"],
     composicao: [
       { insumo_nome: "Resina PEBD", proporcao_percentual: 95, custo_estimado_kg: 7.85 },
-      { insumo_nome: "Masterbatch Branco", proporcao_percentual: 3, custo_estimado_kg: 14.50 },
-      { insumo_nome: "Tintas & Solventes", proporcao_percentual: 2, custo_estimado_kg: 24.00 },
+      { insumo_nome: "Masterbatch Branco", proporcao_percentual: 3, custo_estimado_kg: 14.5 },
+      { insumo_nome: "Tintas & Solventes", proporcao_percentual: 2, custo_estimado_kg: 24.0 },
     ],
     perdaEstimadaPct: 5.5,
     velocidadeMediaKgHora: 38,
@@ -428,9 +541,9 @@ export const DEFAULT_FICHAS_TECNICAS: FichaTecnica[] = [
     setoresProcesso: ["EXTRUSÃO", "IMPRESSÃO", "LAMINAÇÃO", "CORTE"],
     composicao: [
       { insumo_nome: "Filme Extrusado PE", proporcao_percentual: 52, custo_estimado_kg: 7.95 },
-      { insumo_nome: "Filme BOPP/Poliéster", proporcao_percentual: 42, custo_estimado_kg: 16.50 },
-      { insumo_nome: "Adesivo Laminação", proporcao_percentual: 4, custo_estimado_kg: 22.00 },
-      { insumo_nome: "Tintas Flexo", proporcao_percentual: 2, custo_estimado_kg: 28.50 },
+      { insumo_nome: "Filme BOPP/Poliéster", proporcao_percentual: 42, custo_estimado_kg: 16.5 },
+      { insumo_nome: "Adesivo Laminação", proporcao_percentual: 4, custo_estimado_kg: 22.0 },
+      { insumo_nome: "Tintas Flexo", proporcao_percentual: 2, custo_estimado_kg: 28.5 },
     ],
     perdaEstimadaPct: 7.5,
     velocidadeMediaKgHora: 32,
@@ -442,8 +555,8 @@ export const DEFAULT_FICHAS_TECNICAS: FichaTecnica[] = [
     nomePadrao: "Bobina Técnica Filme Liso",
     setoresProcesso: ["EXTRUSÃO", "REBOBINADEIRA"],
     composicao: [
-      { insumo_nome: "Resina PEBD / PELBD", proporcao_percentual: 98, custo_estimado_kg: 8.00 },
-      { insumo_nome: "Aditivos Deslizantes", proporcao_percentual: 2, custo_estimado_kg: 18.00 },
+      { insumo_nome: "Resina PEBD / PELBD", proporcao_percentual: 98, custo_estimado_kg: 8.0 },
+      { insumo_nome: "Aditivos Deslizantes", proporcao_percentual: 2, custo_estimado_kg: 18.0 },
     ],
     perdaEstimadaPct: 2.2,
     velocidadeMediaKgHora: 60,
@@ -456,7 +569,7 @@ export const DEFAULT_FICHAS_TECNICAS: FichaTecnica[] = [
     setoresProcesso: ["EXTRUSÃO", "IMPRESSÃO", "REBOBINADEIRA"],
     composicao: [
       { insumo_nome: "Resina PEBD", proporcao_percentual: 97, custo_estimado_kg: 7.85 },
-      { insumo_nome: "Tintas Flexo", proporcao_percentual: 3, custo_estimado_kg: 28.50 },
+      { insumo_nome: "Tintas Flexo", proporcao_percentual: 3, custo_estimado_kg: 28.5 },
     ],
     perdaEstimadaPct: 4.2,
     velocidadeMediaKgHora: 50,
@@ -464,170 +577,58 @@ export const DEFAULT_FICHAS_TECNICAS: FichaTecnica[] = [
   },
 ];
 
+const FICHAS_KEY = "config:fichas_tecnicas";
+
 export async function loadFichasTecnicas(): Promise<FichaTecnica[]> {
   try {
-    const response = await fetch(
-      `${SUPABASE_URL}/rest/v1/app_storage?key=eq.config:fichas_tecnicas&select=value`,
-      {
-        headers: {
-          apikey: SUPABASE_KEY,
-          Authorization: `Bearer ${SUPABASE_KEY}`,
-        },
-        cache: "no-store",
-      }
-    );
-
-    if (response.ok) {
-      const rows = await response.json();
-      if (rows && rows.length > 0 && rows[0].value) {
-        return JSON.parse(rows[0].value) as FichaTecnica[];
-      }
+    const saved = await readStorageJson<FichaTecnica[]>(FICHAS_KEY);
+    if (saved && saved.length > 0) {
+      dataSourceFlags.fichasTecnicasPadrao = false;
+      return saved;
     }
+    dataSourceFlags.fichasTecnicasPadrao = true;
     return DEFAULT_FICHAS_TECNICAS;
-  } catch {
+  } catch (err) {
+    reportApiError("loadFichasTecnicas", err);
+    dataSourceFlags.fichasTecnicasPadrao = true;
     return DEFAULT_FICHAS_TECNICAS;
   }
 }
 
 export async function saveFichasTecnicas(fichas: FichaTecnica[]): Promise<void> {
-  const response = await fetch(`${SUPABASE_URL}/rest/v1/app_storage?select=key,value,updated_at`, {
-    method: "POST",
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
-      "Content-Type": "application/json",
-      Prefer: "resolution=merge-duplicates,return=representation",
-    },
-    body: JSON.stringify({
-      key: "config:fichas_tecnicas",
-      value: JSON.stringify(fichas),
-      updated_at: new Date().toISOString(),
-    }),
-  });
-
-  if (!response.ok) {
-    throw new Error("Não foi possível salvar as fichas técnicas.");
-  }
+  await writeStorage(FICHAS_KEY, fichas, undefined, "Não foi possível salvar as fichas técnicas.");
+  dataSourceFlags.fichasTecnicasPadrao = false;
 }
 
-function loadInsumosFromStorage(): Insumo[] {
-  return [
-    {
-      id: "mp-1",
-      codigo: "MP-PEBD-01",
-      nome: "Resina Polietileno Baixa Densidade (PEBD)",
-      categoria: "RESINA",
-      unidade_medida: "KG",
-      estoque_atual: 12500,
-      estoque_minimo: 3000,
-      custo_unitario_medio: 7.85,
-      ativo: true,
-    },
-    {
-      id: "mp-2",
-      codigo: "MP-PEAD-01",
-      nome: "Resina Polietileno Alta Densidade (PEAD)",
-      categoria: "RESINA",
-      unidade_medida: "KG",
-      estoque_atual: 8400,
-      estoque_minimo: 2500,
-      custo_unitario_medio: 7.95,
-      ativo: true,
-    },
-    {
-      id: "mp-3",
-      codigo: "MP-PELBD-01",
-      nome: "Resina Polietileno Linear (PELBD)",
-      categoria: "RESINA",
-      unidade_medida: "KG",
-      estoque_atual: 6200,
-      estoque_minimo: 2000,
-      custo_unitario_medio: 8.1,
-      ativo: true,
-    },
-    {
-      id: "mb-1",
-      codigo: "MB-BRANCO-01",
-      nome: "Masterbatch Branco Especial",
-      categoria: "MASTERBATCH",
-      unidade_medida: "KG",
-      estoque_atual: 650,
-      estoque_minimo: 150,
-      custo_unitario_medio: 14.5,
-      ativo: true,
-    },
-    {
-      id: "mb-2",
-      codigo: "MB-PRETO-01",
-      nome: "Masterbatch Preto Alta Cobertura",
-      categoria: "MASTERBATCH",
-      unidade_medida: "KG",
-      estoque_atual: 420,
-      estoque_minimo: 100,
-      custo_unitario_medio: 12.8,
-      ativo: true,
-    },
-    {
-      id: "ti-1",
-      codigo: "TI-AZUL-01",
-      nome: "Tinta Flexográfica Azul Cyan",
-      categoria: "TINTA",
-      unidade_medida: "KG",
-      estoque_atual: 180,
-      estoque_minimo: 50,
-      custo_unitario_medio: 28.5,
-      ativo: true,
-    },
-    {
-      id: "so-1",
-      codigo: "SO-ETANOL-01",
-      nome: "Solvente Etanol Anidro P.A.",
-      categoria: "SOLVENTE",
-      unidade_medida: "L",
-      estoque_atual: 800,
-      estoque_minimo: 200,
-      custo_unitario_medio: 6.2,
-      ativo: true,
-    },
-    {
-      id: "ad-1",
-      codigo: "AD-POLI-01",
-      nome: "Adesivo Laminação Base Solvente",
-      categoria: "ADESIVO",
-      unidade_medida: "KG",
-      estoque_atual: 350,
-      estoque_minimo: 100,
-      custo_unitario_medio: 22.0,
-      ativo: true,
-    },
-  ];
+// ============================================================================
+// OPs ATIVAS (tabela pedidos_op)
+// ============================================================================
+
+export interface OpAtiva {
+  id: string;
+  cliente: string;
+  descricao_item: string;
+  quantidade_planejada_kg: number;
+  material: string;
+  status_producao?: string;
 }
 
-export async function loadActiveOps(): Promise<
-  {
-    id: string;
-    cliente: string;
-    descricao_item: string;
-    quantidade_planejada_kg: number;
-    material: string;
-    status_producao?: string;
-  }[]
-> {
+export async function loadActiveOps(limit = 300): Promise<OpAtiva[]> {
   try {
-    const res = await fetch(
-      `${SUPABASE_URL}/rest/v1/pedidos_op?select=id,cliente,descricao_item,quantidade_planejada_kg,material,status_producao&order=id.desc&limit=300`,
-      {
-        headers: { apikey: SUPABASE_KEY },
-      }
+    const res = await rest(
+      `pedidos_op?select=id,cliente,descricao_item,quantidade_planejada_kg,material,status_producao&order=id.desc&limit=${limit}`
     );
-    if (!res.ok) return [];
-    return await res.json();
-  } catch (e) {
-    console.error("Erro em loadActiveOps:", e);
+    if (!res.ok) throw await failure(res, "Não foi possível carregar as OPs ativas.");
+    return await rows<OpAtiva>(res);
+  } catch (err) {
+    reportApiError("loadActiveOps", err);
     return [];
   }
 }
 
+// ============================================================================
+// BOBINAS SEMIACABADAS (WIP)
+// ============================================================================
 
 export async function loadBobinasWIP(filters?: {
   op_id?: string;
@@ -635,69 +636,35 @@ export async function loadBobinasWIP(filters?: {
   setor?: string;
 }): Promise<BobinaSemiAcabada[]> {
   try {
-    let url = `${SUPABASE_URL}/rest/v1/estoque_semiacabados?select=*&order=created_at.desc`;
-    if (filters?.op_id) {
-      url += `&op_id=eq.${encodeURIComponent(filters.op_id)}`;
-    }
-    if (filters?.status && filters.status !== "TODOS") {
-      url += `&status=eq.${encodeURIComponent(filters.status)}`;
-    }
-    if (filters?.setor && filters.setor !== "TODOS") {
-      url += `&setor_origem=eq.${encodeURIComponent(filters.setor)}`;
-    }
+    let path = "estoque_semiacabados?select=*&order=created_at.desc";
+    if (filters?.op_id) path += `&op_id=eq.${encodeURIComponent(filters.op_id)}`;
+    if (filters?.status && filters.status !== "TODOS") path += `&status=eq.${encodeURIComponent(filters.status)}`;
+    if (filters?.setor && filters.setor !== "TODOS") path += `&setor_origem=eq.${encodeURIComponent(filters.setor)}`;
 
-    const response = await fetch(url, {
-      headers: {
-        apikey: SUPABASE_KEY,
-        Authorization: `Bearer ${SUPABASE_KEY}`,
-      },
-      cache: "no-store",
-    });
-
-    if (!response.ok) {
-      console.warn("Falha ao buscar bobinas WIP no banco:", await response.text());
-      return [];
-    }
-
-    const data = (await response.json()) as BobinaSemiAcabada[];
-    return data;
+    const res = await rest(path);
+    if (!res.ok) throw await failure(res, "Não foi possível carregar as bobinas em processo.");
+    return await rows<BobinaSemiAcabada>(res);
   } catch (err) {
-    console.error("Erro em loadBobinasWIP:", err);
+    reportApiError("loadBobinasWIP", err);
     return [];
   }
 }
 
-export async function saveBobinaWIP(
-  bobina: Partial<BobinaSemiAcabada>
-): Promise<BobinaSemiAcabada> {
+export async function saveBobinaWIP(bobina: Partial<BobinaSemiAcabada>): Promise<BobinaSemiAcabada> {
   const isNew = !bobina.id;
-  const url = isNew
-    ? `${SUPABASE_URL}/rest/v1/estoque_semiacabados?select=*`
-    : `${SUPABASE_URL}/rest/v1/estoque_semiacabados?id=eq.${encodeURIComponent(bobina.id!)}&select=*`;
+  const path = isNew
+    ? "estoque_semiacabados?select=*"
+    : `estoque_semiacabados?id=eq.${encodeURIComponent(bobina.id!)}&select=*`;
 
-  const method = isNew ? "POST" : "PATCH";
-  const body = {
-    ...bobina,
-    updated_at: new Date().toISOString(),
-  };
-
-  const response = await fetch(url, {
-    method,
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
-      "Content-Type": "application/json",
-      Prefer: "return=representation",
-    },
-    body: JSON.stringify(body),
+  const res = await rest(path, {
+    method: isNew ? "POST" : "PATCH",
+    body: { ...bobina, updated_at: new Date().toISOString() },
+    prefer: "return=representation",
   });
+  if (!res.ok) throw await failure(res, "Não foi possível salvar a bobina WIP.");
 
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`Não foi possível salvar a bobina WIP: ${errText}`);
-  }
-
-  const result = (await response.json()) as BobinaSemiAcabada[];
+  const result = await rows<BobinaSemiAcabada>(res);
+  if (!result[0]) throw new ApiError("A bobina não foi encontrada para atualização.", 404);
   return result[0];
 }
 
@@ -706,91 +673,40 @@ export async function updateStatusBobinaWIP(
   status: StatusBobina,
   setor_destino?: string | null
 ): Promise<void> {
-  const body: any = {
-    status,
-    updated_at: new Date().toISOString(),
-  };
-  if (setor_destino !== undefined) {
-    body.setor_destino = setor_destino;
-  }
+  const body: Record<string, unknown> = { status, updated_at: new Date().toISOString() };
+  if (setor_destino !== undefined) body.setor_destino = setor_destino;
 
-  const response = await fetch(
-    `${SUPABASE_URL}/rest/v1/estoque_semiacabados?id=eq.${encodeURIComponent(id)}`,
-    {
-      method: "PATCH",
-      headers: {
-        apikey: SUPABASE_KEY,
-        Authorization: `Bearer ${SUPABASE_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    }
-  );
-
-  if (!response.ok) {
-    throw new Error("Não foi possível atualizar o status da bobina.");
-  }
+  const res = await rest(`estoque_semiacabados?id=eq.${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body,
+  });
+  if (!res.ok) throw await failure(res, "Não foi possível atualizar o status da bobina.");
 }
 
 export async function deleteBobinaWIP(id: string): Promise<void> {
-  const response = await fetch(
-    `${SUPABASE_URL}/rest/v1/estoque_semiacabados?id=eq.${encodeURIComponent(id)}`,
-    {
-      method: "DELETE",
-      headers: {
-        apikey: SUPABASE_KEY,
-        Authorization: `Bearer ${SUPABASE_KEY}`,
-      },
-    }
-  );
-
-  if (!response.ok) {
-    throw new Error("Não foi possível excluir a bobina WIP.");
-  }
+  const res = await rest(`estoque_semiacabados?id=eq.${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (!res.ok) throw await failure(res, "Não foi possível excluir a bobina WIP.");
 }
 
 // ============================================================================
-// ETAPA 3: MOVIMENTAÇÕES DE ESTOQUE (RASTREABILIDADE AUDITÁVEL)
+// MOVIMENTAÇÕES DE ESTOQUE (RASTREABILIDADE AUDITÁVEL)
 // ============================================================================
 
-export async function loadMovimentacoesEstoque(
-  limit: number = 100
-): Promise<MovimentacaoEstoque[]> {
+export async function loadMovimentacoesEstoque(limit: number = 100): Promise<MovimentacaoEstoque[]> {
   try {
-    const url = `${SUPABASE_URL}/rest/v1/estoque_movimentacoes?select=*&order=created_at.desc&limit=${limit}`;
-    const response = await fetch(url, {
-      headers: {
-        apikey: SUPABASE_KEY,
-        Authorization: `Bearer ${SUPABASE_KEY}`,
-      },
-      cache: "no-store",
-    });
-
-    if (!response.ok) {
-      return [];
-    }
-
-    const data = (await response.json()) as MovimentacaoEstoque[];
-    return data;
+    const res = await rest(`estoque_movimentacoes?select=*&order=created_at.desc&limit=${limit}`);
+    if (!res.ok) throw await failure(res, "Não foi possível carregar as movimentações de estoque.");
+    return await rows<MovimentacaoEstoque>(res);
   } catch (err) {
-    console.error("Erro em loadMovimentacoesEstoque:", err);
+    reportApiError("loadMovimentacoesEstoque", err);
     return [];
   }
 }
 
-export async function saveMovimentacaoEstoque(
-  mov: Partial<MovimentacaoEstoque>
-): Promise<MovimentacaoEstoque> {
-  const url = `${SUPABASE_URL}/rest/v1/estoque_movimentacoes?select=*`;
-  const response = await fetch(url, {
+export async function saveMovimentacaoEstoque(mov: Partial<MovimentacaoEstoque>): Promise<MovimentacaoEstoque> {
+  const res = await rest("estoque_movimentacoes?select=*", {
     method: "POST",
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
-      "Content-Type": "application/json",
-      Prefer: "return=representation",
-    },
-    body: JSON.stringify({
+    body: {
       tipo_movimento: mov.tipo_movimento,
       tipo_item: mov.tipo_item || "INSUMO",
       item_id: mov.item_id || null,
@@ -800,93 +716,25 @@ export async function saveMovimentacaoEstoque(
       custo_unitario: Number(mov.custo_unitario) || 0,
       documento_referencia: mov.documento_referencia || null,
       observacao: mov.observacao || null,
-    }),
+    },
+    prefer: "return=representation",
   });
+  if (!res.ok) throw await failure(res, "Erro ao salvar movimentação de estoque.");
 
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`Erro ao salvar movimentação de estoque: ${errText}`);
-  }
-
-  const result = (await response.json()) as MovimentacaoEstoque[];
+  const result = await rows<MovimentacaoEstoque>(res);
+  if (!result[0]) throw new ApiError("A movimentação não foi confirmada pelo banco.", 500);
   return result[0];
 }
 
 // ============================================================================
-// ETAPA: PALETES & ROMANEIO DE PRODUTO ACABADO (REBOBINADEIRA / ACABAMENTO)
+// PALETES & ROMANEIO DE PRODUTO ACABADO
 // ============================================================================
 
-export async function savePalete(palete: PaleteRomaneio, updatedAt?: string): Promise<void> {
-  const key = `palete:${palete.id}`;
-  const now = new Date().toISOString();
-  const payload = {
-    ...palete,
-    updated_at: now,
-  };
-
-  if (updatedAt) {
-    const endpoint = `${SUPABASE_URL}/rest/v1/app_storage?key=eq.${encodeURIComponent(key)}&updated_at=eq.${encodeURIComponent(updatedAt)}&select=key,value,updated_at`;
-    const response = await fetch(endpoint, {
-      method: "PATCH",
-      headers: {
-        apikey: SUPABASE_KEY,
-        Authorization: `Bearer ${SUPABASE_KEY}`,
-        "Content-Type": "application/json",
-        Prefer: "return=representation",
-      },
-      body: JSON.stringify({ value: JSON.stringify(payload), updated_at: now }),
-    });
-    if (response.ok) {
-      const changed = (await response.json()) as StorageRow[];
-      if (changed.length > 0) return;
-    }
-  }
-
-  // Fallback direct patch by key
-  const fallbackEndpoint = `${SUPABASE_URL}/rest/v1/app_storage?key=eq.${encodeURIComponent(key)}&select=key,value,updated_at`;
-  const fallbackResponse = await fetch(fallbackEndpoint, {
-    method: "PATCH",
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
-      "Content-Type": "application/json",
-      Prefer: "return=representation",
-    },
-    body: JSON.stringify({ value: JSON.stringify(payload), updated_at: now }),
-  });
-  if (fallbackResponse.ok) {
-    const changed = (await fallbackResponse.json()) as StorageRow[];
-    if (changed.length > 0) return;
-  }
-
-  // Insert if not exists
-  const insertEndpoint = `${SUPABASE_URL}/rest/v1/app_storage?select=key,value,updated_at`;
-  const insertResponse = await fetch(insertEndpoint, {
-    method: "POST",
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
-      "Content-Type": "application/json",
-      Prefer: "resolution=merge-duplicates,return=representation",
-    },
-    body: JSON.stringify({ key, value: JSON.stringify(payload), updated_at: now }),
-  });
-
-  if (!insertResponse.ok) {
-    throw new Error("Não foi possível salvar o palete no banco de dados.");
-  }
+export async function savePalete(palete: PaleteRomaneio, updatedAt?: string): Promise<WriteResult> {
+  const payload = { ...palete, updated_at: new Date().toISOString() };
+  return writeStorage(`palete:${palete.id}`, payload, updatedAt, "Não foi possível salvar o palete no banco de dados.");
 }
 
 export async function deletePalete(paleteId: string): Promise<void> {
-  const key = `palete:${paleteId}`;
-  const response = await fetch(`${SUPABASE_URL}/rest/v1/app_storage?key=eq.${encodeURIComponent(key)}`, {
-    method: "DELETE",
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
-    },
-  });
-  if (!response.ok) {
-    throw new Error("Não foi possível excluir o palete.");
-  }
+  await deleteStorage(`palete:${paleteId}`, "Não foi possível excluir o palete.");
 }
