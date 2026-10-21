@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useRef } from "react";
 import { Production, Order, Machine, BobinaSemiAcabada, Sector, PaleteRomaneio, ItemPaleteRomaneio, Totals, SECTORS } from "../types/forpack";
 import {
   date,
@@ -13,6 +13,7 @@ import {
 } from "../utils/formatters";
 import {
   saveProduction,
+  updateProduction,
   saveBobinaWIP,
   saveMovimentacaoEstoque,
   loadBobinasWIP,
@@ -171,7 +172,7 @@ export function DailyLaunches({
   operators?: string[];
   paletes?: PaleteRomaneio[];
   totals?: Map<string, Totals>;
-  onSavePalete?: (palete: PaleteRomaneio) => Promise<void>;
+  onSavePalete?: (palete: PaleteRomaneio, silent?: boolean) => Promise<void>;
   onDeletePalete?: (paleteId: string) => Promise<void>;
   selectedDate: string;
   selectedMachine: string;
@@ -180,7 +181,7 @@ export function DailyLaunches({
   onOpen: (order: Order) => void;
   onEditRecord?: (record: Production) => void;
   onRefresh?: () => Promise<void>;
-  onRegisterProduction?: (order: Order, input: Production) => Promise<void>;
+  onRegisterProduction?: (order: Order, input: Production) => Promise<string | undefined | void>;
 }) {
   // Modo de exibição: Terminal de Chão de Fábrica (Cards) vs Histórico Tabular vs Paletes & Romaneios
   const [viewMode, setViewMode] = useState<"terminal" | "historico" | "paletes">("terminal");
@@ -198,6 +199,8 @@ export function DailyLaunches({
   const [selectedPalete, setSelectedPalete] = useState<PaleteRomaneio | null>(null);
   const [paleteModalMachine, setPaleteModalMachine] = useState<Machine | null>(null);
   const [paleteModalOrder, setPaleteModalOrder] = useState<Order | null>(null);
+
+  const isClosingPaleteRef = useRef<Record<string, boolean>>({});
 
   const handleOpenPaleteModal = (
     palete: PaleteRomaneio | null,
@@ -232,29 +235,79 @@ export function DailyLaunches({
     order: Order,
     machine: Machine
   ) => {
-    if (onSavePalete) {
-      await onSavePalete(palete);
+    if (!palete || !palete.id) return;
+
+    // Trava atômica por ID de palete para evitar disparos concorrentes
+    if (isClosingPaleteRef.current[palete.id]) {
+      console.warn("Fechamento do palete já em andamento, ignorando chamada concorrente:", palete.id);
+      return;
     }
-    if (onRegisterProduction) {
+    isClosingPaleteRef.current[palete.id] = true;
+
+    try {
+      // 1. Verifica se já existe um apontamento cadastrado para este palete
+      // (por idApontamentoProducao ou identificador textual "Palete PAL-...")
+      const paleteMarker = `Palete ${palete.numeroPalete}:`;
+      const existingRecord = (allRecords || []).find(r => 
+        (palete.idApontamentoProducao && (r.id === palete.idApontamentoProducao || r._key?.endsWith(palete.idApontamentoProducao))) ||
+        (r.descricaoItem && r.descricaoItem.includes(paleteMarker) && (r.idPedido === order.id || r.idPedido === order.numeroOp))
+      );
+
+      if (existingRecord) {
+        // Se já existe apontamento prévio, ATUALIZA o apontamento em vez de criar um segundo duplicado!
+        await updateProduction({
+          ...existingRecord,
+          qtdProduzido: String(palete.pesoLiquidoTotal),
+          dataProducao: palete.data,
+          turno: palete.turno,
+          operador: palete.operador,
+          maquinaId: machine.id,
+          descricaoItem: `${order.descricaoItem} (Palete ${palete.numeroPalete}: ${palete.totalVolumes} bobinas)`,
+        });
+
+        palete.idApontamentoProducao = existingRecord.id;
+        palete.status = "FECHADO";
+        if (onSavePalete) {
+          await onSavePalete(palete, true);
+        }
+
+        notify(`Palete ${palete.numeroPalete} atualizado com sucesso! ${palete.pesoLiquidoTotal.toFixed(1)} kg sincronizados na produção.`);
+        if (onRefresh) await onRefresh();
+        return;
+      }
+
+      // 2. Não existe apontamento ainda: cadastra novo apontamento e vincula o id ao palete
       const prodInput: Production = {
         qtdProduzido: String(palete.pesoLiquidoTotal),
         dataProducao: palete.data,
         turno: palete.turno,
         operador: palete.operador,
+        maquinaId: machine.id,
         descricaoItem: `${order.descricaoItem} (Palete ${palete.numeroPalete}: ${palete.totalVolumes} bobinas)`,
       };
-      await onRegisterProduction(order, prodInput);
-    } else {
-      await saveProduction(order, machine, {
-        qtdProduzido: String(palete.pesoLiquidoTotal),
-        dataProducao: palete.data,
-        turno: palete.turno,
-        operador: palete.operador,
-      });
-    }
 
-    notify(`Palete ${palete.numeroPalete} fechado com sucesso! ${palete.pesoLiquidoTotal.toFixed(1)} kg lançados na produção.`);
-    if (onRefresh) await onRefresh();
+      let registeredId: string | undefined;
+      if (onRegisterProduction) {
+        const res = await onRegisterProduction(order, prodInput);
+        if (typeof res === "string") registeredId = res;
+      } else {
+        registeredId = await saveProduction(order, machine, prodInput);
+      }
+
+      if (registeredId) {
+        palete.idApontamentoProducao = registeredId;
+      }
+      palete.status = "FECHADO";
+
+      if (onSavePalete) {
+        await onSavePalete(palete, true);
+      }
+
+      notify(`Palete ${palete.numeroPalete} fechado com sucesso! ${palete.pesoLiquidoTotal.toFixed(1)} kg lançados na produção.`);
+      if (onRefresh) await onRefresh();
+    } finally {
+      delete isClosingPaleteRef.current[palete.id];
+    }
   };
 
   // Modal de Apontamento Rápido
@@ -2132,11 +2185,13 @@ export function DailyLaunches({
           records={productionRecords}
           machines={machines}
           totals={totals}
-          onSavePalete={async (palete) => {
+          onSavePalete={async (palete, silent?: boolean) => {
             if (onSavePalete) {
               await onSavePalete(palete);
             }
-            notify(`Palete ${palete.numeroPalete} salvo com sucesso!`);
+            if (!silent) {
+              notify(`Palete ${palete.numeroPalete} salvo com sucesso!`);
+            }
             if (onRefresh) await onRefresh();
           }}
           onClosePaleteAndRegister={handleClosePaleteAndRegister}

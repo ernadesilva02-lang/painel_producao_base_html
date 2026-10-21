@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from "react";
-import { History, Calendar, Clock, User, Pencil, Info, ChevronDown, ChevronUp } from "lucide-react";
+import { History, Calendar, Clock, User, Pencil, Info, ChevronDown, ChevronUp, Trash2 } from "lucide-react";
 import { Order, Machine, Production, SECTORS, PRODUCT_CATEGORIES } from "../types/forpack";
 import { date, kg, number, inferredCategory, categoryLabel, orderBalance } from "../utils/formatters";
 
@@ -9,6 +9,7 @@ export function EditProductionForm({
   machines = [],
   saving,
   onSave,
+  onDelete,
   onCancel,
 }: {
   record: Production;
@@ -16,6 +17,7 @@ export function EditProductionForm({
   machines?: Machine[];
   saving: boolean;
   onSave: (record: Production) => void;
+  onDelete?: (record: Production) => void;
   onCancel: () => void;
 }) {
   const [input, setInput] = useState<Production>({ ...record });
@@ -90,13 +92,28 @@ export function EditProductionForm({
           <input inputMode="decimal" value={input.picote || ""} onChange={event => update("picote", event.target.value)} />
         </label>
       </div>
-      <div className="form-actions">
-        <button type="button" className="cancel-action" disabled={saving} onClick={onCancel}>
-          Cancelar
-        </button>
-        <button type="submit" className="primary-action" disabled={!valid || saving}>
-          {saving ? "Salvando..." : "Salvar correção"}
-        </button>
+      <div className="form-actions" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", gap: "10px" }}>
+        {onDelete ? (
+          <button
+            type="button"
+            className="cancel-action"
+            style={{ color: "#dc2626", borderColor: "#fca5a5", backgroundColor: "#fef2f2", display: "inline-flex", alignItems: "center", gap: "6px" }}
+            disabled={saving}
+            onClick={() => onDelete(record)}
+            title="Excluir este lançamento (remover duplicidades)"
+          >
+            <Trash2 size={14} />
+            <span>Excluir apontamento</span>
+          </button>
+        ) : <div />}
+        <div style={{ display: "flex", gap: "8px" }}>
+          <button type="button" className="cancel-action" disabled={saving} onClick={onCancel}>
+            Cancelar
+          </button>
+          <button type="submit" className="primary-action" disabled={!valid || saving}>
+            {saving ? "Salvando..." : "Salvar correção"}
+          </button>
+        </div>
       </div>
     </form>
   );

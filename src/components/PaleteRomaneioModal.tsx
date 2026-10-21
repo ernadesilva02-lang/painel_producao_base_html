@@ -494,6 +494,7 @@ export function PaleteRomaneioModal({
       pesoLiquidoTotal: Math.round(calcLiquido * 100) / 100,
       status: statusToUse,
       observacoes: observacoes.trim() || undefined,
+      idApontamentoProducao: initialPalete?.idApontamentoProducao,
       created_at: initialPalete?.created_at || new Date().toISOString(),
       updated_at: new Date().toISOString(),
       fechado_em:
@@ -698,8 +699,13 @@ export function PaleteRomaneioModal({
     }
   };
 
+  const isClosingRef = useRef(false);
+
   // Close pallet, register production and open print window
   const handleCloseAndPrint = async () => {
+    // Trava atômica contra cliques rápidos simultâneos
+    if (isClosingRef.current || saving) return;
+
     if (itens.length === 0) {
       setErrorMsg("Adicione ao menos uma bobina para fechar o palete.");
       return;
@@ -709,8 +715,18 @@ export function PaleteRomaneioModal({
       return;
     }
 
+    // Se o palete já está com status FECHADO, o operador deseja apenas reimprimir o romaneio!
+    // NÃO deve disparar onClosePaleteAndRegister novamente para evitar duplicidade de lançamento no sistema!
+    if (status === "FECHADO" || initialPalete?.status === "FECHADO") {
+      const paleteFechado = buildPaleteObject(itens, "FECHADO");
+      printOfficialRomaneio(paleteFechado);
+      onClose();
+      return;
+    }
+
     const machToUse = selectedMachine || resolveMachine(machine, initialPalete, selectedOrder, machines);
 
+    isClosingRef.current = true;
     setSaving(true);
     setErrorMsg("");
     try {
@@ -722,7 +738,7 @@ export function PaleteRomaneioModal({
         localStorage.removeItem(`forpack_draft_palete_${paleteFechado.id}`);
       } catch {}
 
-      // Trigger printing of the official Forpack Romaneio
+      // Dispara a impressão do Romaneio Oficial Forpack
       printOfficialRomaneio(paleteFechado);
 
       onClose();
@@ -734,6 +750,7 @@ export function PaleteRomaneioModal({
       );
     } finally {
       setSaving(false);
+      isClosingRef.current = false;
     }
   };
 
@@ -1863,15 +1880,32 @@ export function PaleteRomaneioModal({
               Cancelar
             </button>
 
-            <button
-              type="button"
-              onClick={handleCloseAndPrint}
-              disabled={saving || itens.length === 0}
-              className="px-7 py-3.5 bg-blue-600 hover:bg-blue-500 active:scale-98 text-white rounded-xl text-sm font-black shadow-lg hover:shadow-blue-500/25 transition flex items-center justify-center gap-2.5 cursor-pointer disabled:opacity-50"
-            >
-              <Printer className="w-5 h-5" />
-              <span>{status === "FECHADO" ? "Reimprimir Romaneio" : "Fechar Palete & Imprimir Romaneio"}</span>
-            </button>
+            {status === "FECHADO" || initialPalete?.status === "FECHADO" ? (
+              <button
+                type="button"
+                onClick={() => {
+                  const paleteAtual = buildPaleteObject(itens, "FECHADO");
+                  printOfficialRomaneio(paleteAtual);
+                  onClose();
+                }}
+                disabled={saving}
+                className="px-7 py-3.5 bg-slate-800 hover:bg-slate-700 active:scale-98 text-white rounded-xl text-sm font-black shadow-lg hover:shadow-slate-700/25 transition flex items-center justify-center gap-2.5 cursor-pointer disabled:opacity-50"
+                title="Palete já fechado. Reimprime o Romaneio Oficial sem criar novos lançamentos de produção."
+              >
+                <Printer className="w-5 h-5 text-amber-400" />
+                <span>Reimprimir Romaneio (Sem duplicar)</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={handleCloseAndPrint}
+                disabled={saving || isClosingRef.current || itens.length === 0}
+                className="px-7 py-3.5 bg-blue-600 hover:bg-blue-500 active:scale-98 text-white rounded-xl text-sm font-black shadow-lg hover:shadow-blue-500/25 transition flex items-center justify-center gap-2.5 cursor-pointer disabled:opacity-50"
+              >
+                <Printer className="w-5 h-5" />
+                <span>Fechar Palete & Imprimir Romaneio</span>
+              </button>
+            )}
           </div>
         </div>
 
