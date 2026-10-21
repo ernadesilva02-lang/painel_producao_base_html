@@ -32,6 +32,7 @@ import {
   saveRegistry,
   savePalete,
   deletePalete,
+  deleteProduction,
 } from "./services/supabaseApi";
 import {
   LayoutDashboard,
@@ -594,18 +595,20 @@ export default function App() {
     }, 250);
   }
 
-  async function registerProduction(order: Order, input: Production) {
+  async function registerProduction(order: Order, input: Production): Promise<string | undefined> {
     const machine = data.machines.find(item => item.id === (input.maquinaId || order.maquinaId));
     if (!machine) return;
     setSaving(true);
     setNotice("");
     try {
-      await saveProduction(order, machine, input);
+      const recId = await saveProduction(order, machine, input);
       setSelected(null);
       setNotice(`Produção do pedido ${order.id} registrada com sucesso.`);
       await refresh();
+      return recId;
     } catch (e) {
       setNotice(e instanceof Error ? e.message : "Erro ao registrar a produção.");
+      throw e;
     } finally {
       setSaving(false);
     }
@@ -743,6 +746,26 @@ export default function App() {
       await refresh();
     } catch (e) {
       setNotice(e instanceof Error ? e.message : "Erro ao atualizar o apontamento.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function deleteProductionRecord(record: Production) {
+    const order = data.orders.find(o => o.id === record.idPedido || o.numeroOp === record.idPedido);
+    const opLabel = order?.numeroOp ? `OP ${order.numeroOp}` : record.idPedido;
+    if (!window.confirm(`Tem certeza que deseja excluir este apontamento de ${record.qtdProduzido} kg da ${opLabel}? Esta ação removerá o lançamento duplicado e recalculará os totais da produção.`)) {
+      return;
+    }
+    setSaving(true);
+    setNotice("");
+    try {
+      await deleteProduction(record);
+      setSelectedRecord(null);
+      setNotice(`Apontamento de ${record.qtdProduzido} kg da ${opLabel} excluído com sucesso.`);
+      await refresh();
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : "Erro ao excluir o apontamento.");
     } finally {
       setSaving(false);
     }
@@ -1156,7 +1179,13 @@ export default function App() {
                     <strong>Carregando dados reais do Supabase...</strong>
                   </div>
                 ) : active === "Relatórios" ? (
-                  <ProductionReport records={reportRecords} orders={data.orders} machines={data.machines} onEdit={setSelectedRecord} />
+                  <ProductionReport
+                    records={reportRecords}
+                    orders={data.orders}
+                    machines={data.machines}
+                    onEdit={setSelectedRecord}
+                    onDelete={deleteProductionRecord}
+                  />
                 ) : active === "Programação PCP" && pcpView === "Programadas" ? (
                   <>
                     <PcpCategorySummary items={pcpCategorySummary} />
@@ -1362,13 +1391,14 @@ export default function App() {
             </button>
             <p className="eyebrow">CORREÇÃO CONTROLADA</p>
             <h2>Editar apontamento</h2>
-            <p className="drawer-client">A alteração atualizará os totais da OP. O registro não será excluído.</p>
+            <p className="drawer-client">Corrija os dados informados ou exclua este apontamento em caso de duplicidade.</p>
             <EditProductionForm
               record={selectedRecord}
               operators={data.operators}
               machines={data.machines}
               saving={saving}
               onSave={editProduction}
+              onDelete={deleteProductionRecord}
               onCancel={() => setSelectedRecord(null)}
             />
           </article>
