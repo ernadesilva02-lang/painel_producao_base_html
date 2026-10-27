@@ -29,7 +29,6 @@ import {
   QrCode,
   Barcode,
 } from "lucide-react";
-import QRCode from "qrcode";
 import { Order, ItemPaleteRomaneio, PaleteRomaneio } from "../types/forpack";
 
 export interface EtiquetaZebraData {
@@ -59,16 +58,215 @@ export interface EtiquetaZebraData {
 }
 
 /**
- * Gera QR Code nativo vetorial em SVG de forma síncrona para impressão e tela
+ * Gerador de Matriz QR Code autônomo e nativo (puro TypeScript sem pacotes externos).
+ * Suporta versões 1 a 4 com correção de erro nível M, ideal para bipagem industrial (OP, Bobina, Lote).
+ */
+function createPureQRMatrix(text: string): number[][] {
+  const bytes: number[] = [];
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code < 128) bytes.push(code);
+    else if (code < 2048) { bytes.push(192 | (code >> 6)); bytes.push(128 | (code & 63)); }
+    else { bytes.push(224 | (code >> 12)); bytes.push(128 | ((code >> 6) & 63)); bytes.push(128 | (code & 63)); }
+  }
+
+  const VERSIONS = [
+    null,
+    { size: 21, data: 14, ec: 10, align: [] as number[] },
+    { size: 25, data: 26, ec: 16, align: [6, 18] },
+    { size: 29, data: 42, ec: 26, align: [6, 22] },
+    { size: 33, data: 62, ec: 36, align: [6, 26] },
+  ];
+
+  let ver = 1;
+  while (ver <= 4 && bytes.length + 3 > (VERSIONS[ver]?.data ?? 0)) {
+    ver++;
+  }
+  if (ver > 4) ver = 4;
+  const vInfo = VERSIONS[ver]!;
+
+  const bitBuf: number[] = [];
+  const putBits = (val: number, len: number) => {
+    for (let i = len - 1; i >= 0; i--) {
+      bitBuf.push((val >> i) & 1);
+    }
+  };
+
+  putBits(4, 4); // Byte mode
+  putBits(bytes.length, 8); // Quantidade de bytes
+  for (const b of bytes) putBits(b, 8);
+  putBits(0, Math.min(4, vInfo.data * 8 - bitBuf.length)); // Terminador
+  while (bitBuf.length % 8 !== 0) bitBuf.push(0);
+
+  const dataBytes: number[] = [];
+  for (let i = 0; i < bitBuf.length; i += 8) {
+    let byteVal = 0;
+    for (let j = 0; j < 8; j++) byteVal = (byteVal << 1) | bitBuf[i + j];
+    dataBytes.push(byteVal);
+  }
+
+  const padBytes = [0xec, 0x11];
+  let padIdx = 0;
+  while (dataBytes.length < vInfo.data) {
+    dataBytes.push(padBytes[padIdx % 2]);
+    padIdx++;
+  }
+
+  // Tabela Galois Field GF(256)
+  const exp = new Uint8Array(512);
+  const log = new Uint8Array(256);
+  let x = 1;
+  for (let i = 0; i < 255; i++) {
+    exp[i] = x;
+    exp[i + 255] = x;
+    log[x] = i;
+    x <<= 1;
+    if (x & 256) x ^= 0x11d;
+  }
+  const gfMul = (a: number, b: number) => (a === 0 || b === 0 ? 0 : exp[log[a] + log[b]]);
+
+  // Polinômio gerador Reed-Solomon
+  let gen = [1];
+  for (let i = 0; i < vInfo.ec; i++) {
+    const next = new Array(gen.length + 1).fill(0);
+    for (let j = 0; j < gen.length; j++) {
+      next[j] ^= gfMul(gen[j], exp[i]);
+      next[j + 1] ^= gen[j];
+    }
+    gen = next;
+  }
+
+  // Resto de divisão Reed-Solomon (bytes de correção de erro)
+  const msg = new Array(dataBytes.length + vInfo.ec).fill(0);
+  for (let i = 0; i < dataBytes.length; i++) msg[i] = dataBytes[i];
+  for (let i = 0; i < dataBytes.length; i++) {
+    const coef = msg[i];
+    if (coef !== 0) {
+      for (let j = 0; j < gen.length; j++) {
+        msg[i + j] ^= gfMul(gen[j], coef);
+      }
+    }
+  }
+  const ecBytes = msg.slice(dataBytes.length);
+  const allCodewords = dataBytes.concat(ecBytes);
+
+  // Construção da matriz visual
+  const size = vInfo.size;
+  const matrix: number[][] = Array.from({ length: size }, () => new Array(size).fill(0));
+  const reserved: boolean[][] = Array.from({ length: size }, () => new Array(size).fill(false));
+
+  const setFinder = (r: number, c: number) => {
+    for (let dr = -1; dr <= 7; dr++) {
+      for (let dc = -1; dc <= 7; dc++) {
+        const nr = r + dr, nc = c + dc;
+        if (nr >= 0 && nr < size && nc >= 0 && nc < size) {
+          reserved[nr][nc] = true;
+          const isBlack = (dr >= 0 && dr <= 6 && dc >= 0 && dc <= 6) &&
+            (dr === 0 || dr === 6 || dc === 0 || dc === 6 || (dr >= 2 && dr <= 4 && dc >= 2 && dc <= 4));
+          matrix[nr][nc] = isBlack ? 1 : 0;
+        }
+      }
+    }
+  };
+
+  setFinder(0, 0);
+  setFinder(0, size - 7);
+  setFinder(size - 7, 0);
+
+  // Linhas de sincronização (timing)
+  for (let i = 8; i < size - 8; i++) {
+    if (!reserved[6][i]) { matrix[6][i] = (i % 2 === 0 ? 1 : 0); reserved[6][i] = true; }
+    if (!reserved[i][6]) { matrix[i][6] = (i % 2 === 0 ? 1 : 0); reserved[i][6] = true; }
+  }
+
+  // Padrão de alinhamento para versão >= 2
+  if (vInfo.align.length > 0) {
+    const coords = vInfo.align;
+    for (const r of coords) {
+      for (const c of coords) {
+        if (reserved[r][c]) continue;
+        for (let dr = -2; dr <= 2; dr++) {
+          for (let dc = -2; dc <= 2; dc++) {
+            reserved[r + dr][c + dc] = true;
+            const isBlack = Math.max(Math.abs(dr), Math.abs(dc)) !== 1;
+            matrix[r + dr][c + dc] = isBlack ? 1 : 0;
+          }
+        }
+      }
+    }
+  }
+
+  // Módulo escuro permanente
+  matrix[size - 8][8] = 1;
+  reserved[size - 8][8] = true;
+
+  // Reserva de informação de formato
+  for (let i = 0; i < 9; i++) {
+    if (i !== 6) { reserved[8][i] = true; reserved[i][8] = true; }
+  }
+  for (let i = size - 8; i < size; i++) {
+    reserved[8][i] = true;
+    reserved[i][8] = true;
+  }
+
+  // Sequência de bits dos dados
+  const totalBits: number[] = [];
+  for (const b of allCodewords) {
+    for (let i = 7; i >= 0; i--) totalBits.push((b >> i) & 1);
+  }
+
+  // Posicionamento em zigue-zague
+  let bitIdx = 0;
+  let dir = -1;
+  let col = size - 1;
+  while (col > 0) {
+    if (col === 6) col--;
+    const rStart = dir === -1 ? size - 1 : 0;
+    const rEnd = dir === -1 ? -1 : size;
+    for (let r = rStart; r !== rEnd; r += (dir === -1 ? -1 : 1)) {
+      for (let c = col; c >= col - 1; c--) {
+        if (!reserved[r][c]) {
+          const bit = bitIdx < totalBits.length ? totalBits[bitIdx++] : 0;
+          const mask = ((r + c) % 2 === 0) ? 1 : 0;
+          matrix[r][c] = (bit ^ mask);
+        }
+      }
+    }
+    dir = -dir;
+    col -= 2;
+  }
+
+  // Bits de formato para Nível M + Máscara 0 (BCH 15 bits com máscara XOR 0x5412)
+  const formatBits = [1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0];
+  const tlCoords = [
+    [8, 0], [8, 1], [8, 2], [8, 3], [8, 4], [8, 5], [8, 7], [8, 8],
+    [7, 8], [5, 8], [4, 8], [3, 8], [2, 8], [1, 8], [0, 8]
+  ];
+  for (let i = 0; i < 15; i++) {
+    matrix[tlCoords[i][0]][tlCoords[i][1]] = formatBits[i];
+  }
+  for (let i = 0; i < 7; i++) {
+    matrix[size - 1 - i][8] = formatBits[i];
+  }
+  for (let i = 0; i < 8; i++) {
+    matrix[8][size - 8 + i] = formatBits[7 + i];
+  }
+
+  return matrix;
+}
+
+/**
+ * Gera QR Code nativo vetorial em SVG de forma 100% síncrona e sem qualquer dependência externa
  */
 export function generateQrCodeSvg(text: string, sizePx: number = 66): string {
   try {
-    const qr = QRCode.create(text || "FORPACK", { errorCorrectionLevel: "M" });
-    const size = qr.modules.size;
+    const clean = (text || "FORPACK").trim();
+    const matrix = createPureQRMatrix(clean);
+    const size = matrix.length;
     const pathSegments: string[] = [];
     for (let r = 0; r < size; r++) {
       for (let c = 0; c < size; c++) {
-        if (qr.modules.get(r, c)) {
+        if (matrix[r][c] === 1) {
           pathSegments.push(`M${c + 1},${r + 1}h1v1h-1z`);
         }
       }
