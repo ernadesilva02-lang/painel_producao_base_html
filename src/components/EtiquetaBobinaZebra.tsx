@@ -32,11 +32,12 @@ import {
 import { Order, ItemPaleteRomaneio, PaleteRomaneio } from "../types/forpack";
 
 export interface EtiquetaZebraData {
-  tipoFilme: string;      // Ex: "FILME PEBD IMP" ou "FILME PEBD LISO"
-  aplicacao: string;      // Ex: "PIPOCA LYPE" ou "PADRAO ALIMENTOS" (sem "P/", limpo conforme foto)
-  cliente?: string;       // Ex: "INDÚSTRIA LYPE LTDA"
-  medidas: string;        // Ex: "69X0,028"
-  dataImpressao: string;  // Ex: "25/09/2026"
+  tipoFilme: string;      // Ex: "FILME PEBD IMP" ou "PET+PE"
+  aplicacao: string;      // Ex: "FILME LAM PET+PE IMP ALHO ROXO 1KG 54X0,08" (Item / Produto da OP)
+  itemDescricao?: string; // Descrição completa do Item da OP
+  cliente?: string;       // Ex: "ALIMEMPRO PRODUTOS"
+  medidas: string;        // Ex: "54X0,08"
+  dataImpressao: string;  // Ex: "28/10/2026"
   tamanhoEtiqueta: "100x30" | "43x24" | "60x40" | "70x50" | "100x50" | "custom";
   larguraMm?: number;     // Ex: 100
   alturaMm?: number;      // Ex: 30
@@ -348,7 +349,16 @@ export function loadSavedEtiquetaZebraPreferences(): Partial<EtiquetaZebraData> 
   try {
     const raw = localStorage.getItem(ZEBRA_CONFIG_STORAGE_KEY);
     if (raw) {
-      return JSON.parse(raw);
+      const parsed = JSON.parse(raw);
+      // Remove campos voláteis específicos de OP para garantir que novas OPs sempre peguem dados reais
+      delete parsed.cliente;
+      delete parsed.aplicacao;
+      delete parsed.itemDescricao;
+      delete parsed.tipoFilme;
+      delete parsed.medidas;
+      delete parsed.codigoOp;
+      delete parsed.numeroPalete;
+      return parsed;
     }
   } catch (err) {
     console.warn("Erro ao carregar preferências da Zebra:", err);
@@ -358,6 +368,7 @@ export function loadSavedEtiquetaZebraPreferences(): Partial<EtiquetaZebraData> 
 
 /**
  * Salva permanentemente as preferências de sentido e formato de etiqueta para próximas impressões
+ * Apenas parâmetros da impressora térmica (margens, dimensões, orientação, rolo, modo CSS, bipagem) são gravados.
  */
 export function saveEtiquetaZebraPreferences(config: Partial<EtiquetaZebraData>): void {
   try {
@@ -377,7 +388,6 @@ export function saveEtiquetaZebraPreferences(config: Partial<EtiquetaZebraData>)
       deslocamentoHorizontalMm: config.deslocamentoHorizontalMm ?? prev.deslocamentoHorizontalMm,
       espacamentoColunasMm: config.espacamentoColunasMm ?? prev.espacamentoColunasMm,
       modoSaidaImpressao: config.modoSaidaImpressao ?? prev.modoSaidaImpressao,
-      cliente: config.cliente ?? prev.cliente,
       tipoCodigoBipagem: config.tipoCodigoBipagem ?? prev.tipoCodigoBipagem,
     };
     localStorage.setItem(ZEBRA_CONFIG_STORAGE_KEY, JSON.stringify(toSave));
@@ -399,97 +409,79 @@ export function resetEtiquetaZebraPreferences(): void {
 
 /**
  * Utilitário para deduzir campos da etiqueta a partir da OP ou Palete
- * Mesclando com preferências persistidas no navegador do operador
+ * Mesclando com preferências mecânicas da impressora
  */
 export function inferEtiquetaZebraData(
   order: Order | null | undefined,
   palete?: PaleteRomaneio | null
 ): EtiquetaZebraData {
-  const desc = (order?.descricaoItem || palete?.descricaoItem || "FILME PEBD IMP PIPOCA LYPE 69X0,028").trim();
-  const mat = (order?.material || "").trim();
-
-  // Tenta extrair dimensões como 69X0,028, 30x0,08, 110x0,06 ou 400x0,060
-  const dimMatch = desc.match(/(\d+(?:[.,]\d+)?\s*[xX*]\s*\d+(?:[.,]\d+)?)/);
-  const medidas = dimMatch ? dimMatch[1].replace(/\s+/g, "").toUpperCase() : "69X0,028";
-
-  // Identifica Tipo de Filme / Material
-  let tipoFilme = "FILME PEBD IMP";
-  const descUpper = desc.toUpperCase();
-
-  if (descUpper.startsWith("FILME PEBD IMP") || descUpper.includes("PEBD IMP")) {
-    tipoFilme = "FILME PEBD IMP";
-  } else if (descUpper.startsWith("FILME PEBD LISO") || (descUpper.includes("PEBD") && descUpper.includes("LISO"))) {
-    tipoFilme = "FILME PEBD LISO";
-  } else if (descUpper.startsWith("FILME PEAD IMP") || descUpper.includes("PEAD IMP")) {
-    tipoFilme = "FILME PEAD IMP";
-  } else if (descUpper.startsWith("FILME PP IMP") || descUpper.includes("PP IMP")) {
-    tipoFilme = "FILME PP IMP";
-  } else if (mat) {
-    tipoFilme = mat.toUpperCase();
-    if (!tipoFilme.includes("FILME") && !tipoFilme.includes("SACO")) tipoFilme = `FILME ${tipoFilme}`;
-  } else if (desc) {
-    const words = desc.split(/\s+/);
-    if (words.length >= 3 && /filme|saco|pebd|pead|pp/i.test(words[0])) {
-      tipoFilme = words.slice(0, 3).join(" ").toUpperCase();
-    }
-  }
-
-  // Nome do Produto / Aplicação
-  let aplicacao = "";
-  if (order?.cliente && order.cliente !== "Cliente Forpack") {
-    aplicacao = order.cliente.replace(/^[pP]\/\s*/, "").trim().toUpperCase();
-  }
-
-  let cleanedDesc = desc;
-  if (dimMatch) {
-    cleanedDesc = cleanedDesc.replace(dimMatch[0], "");
-  }
-  cleanedDesc = cleanedDesc
-    .replace(/FILME\s+PEBD\s+IMP/gi, "")
-    .replace(/FILME\s+PEBD\s+LISO/gi, "")
-    .replace(/FILME\s+PEBD/gi, "")
-    .replace(/FILME\s+PEAD/gi, "")
-    .replace(/FILME\s+PP/gi, "")
-    .replace(/SACO\s+PEBD/gi, "")
-    .replace(/SACO\s+PP/gi, "")
-    .replace(/^[pP]\/\s*/, "")
-    .replace(/VALVULADO/gi, "")
-    .trim();
-
-  if (cleanedDesc.length >= 3) {
-    aplicacao = cleanedDesc.toUpperCase();
-  }
-
-  if (!aplicacao) {
-    aplicacao = "PIPOCA LYPE";
-  }
-
-  // Extração dedicada do Cliente
+  // 1. Extração estrita e prioritária do Cliente a partir da OP ou Palete ativa
   let clienteNome = "";
-  if (order?.cliente && order.cliente !== "Cliente Forpack") {
+  if (order?.cliente && order.cliente.trim() && order.cliente !== "Cliente Forpack" && order.cliente !== "FORPACK CLIENTE") {
     clienteNome = order.cliente.replace(/^[pP]\/\s*/, "").trim().toUpperCase();
-  } else if (palete?.cliente && palete.cliente !== "Cliente Forpack") {
+  } else if (palete?.cliente && palete.cliente.trim() && palete.cliente !== "Cliente Forpack" && palete.cliente !== "FORPACK CLIENTE") {
     clienteNome = palete.cliente.replace(/^[pP]\/\s*/, "").trim().toUpperCase();
   }
   if (!clienteNome) {
-    clienteNome = aplicacao || "PIPOCA LYPE";
+    clienteNome = "CLIENTE";
   }
 
-  // Data formatada DD/MM/AAAA
+  // 2. Extração fiel da Descrição do Item (sem distorcer ou apagar dados da OP)
+  const rawItemDesc = (order?.descricaoItem || palete?.descricaoItem || "").trim();
+  const itemDescricao = rawItemDesc || "PRODUTO ACABADO";
+
+  // 3. Extração das medidas (ex: 54X0,08, 63X0,028, 69X0,028)
+  const dimMatch = itemDescricao.match(/(\d+(?:[.,]\d+)?\s*[xX*]\s*\d+(?:[.,]\d+)?)/);
+  const medidas = dimMatch ? dimMatch[1].replace(/\s+/g, "").toUpperCase() : "54X0,08";
+
+  // 4. Identifica Tipo de Filme / Material
+  const mat = (order?.material || "").trim();
+  let tipoFilme = "";
+  if (mat) {
+    tipoFilme = mat.toUpperCase();
+    if (!tipoFilme.includes("FILME") && !tipoFilme.includes("SACO")) tipoFilme = `FILME ${tipoFilme}`;
+  } else {
+    const descUpper = itemDescricao.toUpperCase();
+    if (descUpper.startsWith("FILME PEBD IMP") || descUpper.includes("PEBD IMP")) {
+      tipoFilme = "FILME PEBD IMP";
+    } else if (descUpper.startsWith("FILME PEBD LISO") || (descUpper.includes("PEBD") && descUpper.includes("LISO"))) {
+      tipoFilme = "FILME PEBD LISO";
+    } else if (descUpper.startsWith("FILME PEAD IMP") || descUpper.includes("PEAD IMP")) {
+      tipoFilme = "FILME PEAD IMP";
+    } else if (descUpper.startsWith("FILME PP IMP") || descUpper.includes("PP IMP")) {
+      tipoFilme = "FILME PP IMP";
+    } else if (descUpper.includes("PET+PE") || descUpper.includes("PET/PE")) {
+      tipoFilme = "FILME PET+PE";
+    } else if (descUpper.includes("BOPP")) {
+      tipoFilme = "FILME BOPP";
+    } else {
+      const words = itemDescricao.split(/\s+/);
+      if (words.length >= 2 && /filme|saco|pebd|pead|pp/i.test(words[0])) {
+        tipoFilme = words.slice(0, 3).join(" ").toUpperCase();
+      }
+    }
+  }
+  if (!tipoFilme) {
+    tipoFilme = "FILME PET+PE";
+  }
+
+  // 5. Data formatada DD/MM/AAAA
   const rawDate = palete?.data || order?.data || new Date().toISOString().slice(0, 10);
   const [year, month, day] = rawDate.split("-");
   const dataFormatada = year && month && day ? `${day}/${month}/${year}` : new Date().toLocaleDateString("pt-BR");
 
+  // Carrega apenas preferências mecânicas da impressora
   const saved = loadSavedEtiquetaZebraPreferences();
   const tamanho = (saved.tamanhoEtiqueta as any) || "100x30";
   const is100x30 = tamanho === "100x30";
   const is43x24 = tamanho === "43x24";
 
   return {
-    tipoFilme: tipoFilme || "FILME PEBD IMP",
-    aplicacao: aplicacao || "PIPOCA LYPE",
-    cliente: saved.cliente || clienteNome || "PIPOCA LYPE",
-    medidas: medidas || "69X0,028",
+    tipoFilme: tipoFilme,
+    aplicacao: itemDescricao,
+    itemDescricao: itemDescricao,
+    cliente: clienteNome,
+    medidas: medidas,
     dataImpressao: dataFormatada,
     tamanhoEtiqueta: tamanho,
     larguraMm: saved.larguraMm || (is100x30 ? 100 : is43x24 ? 43 : 100),
@@ -633,16 +625,20 @@ export function buildEtiquetasHtml(
 
           <div class="divider-line"></div>
 
-          <!-- CORPO: CLIENTE, MATERIAL E MEDIDAS -->
+          <!-- CORPO: CLIENTE, ITEM, MATERIAL E MEDIDAS -->
           <div class="card-body-100x30">
             <div class="body-info-left">
               <div class="info-cliente">
                 <span class="label-prefix">CLIENTE:</span>
-                <span class="val-cliente">${config.cliente || config.aplicacao}</span>
+                <span class="val-cliente">${config.cliente || "CLIENTE"}</span>
+              </div>
+              <div class="info-produto">
+                <span class="label-prefix">ITEM:</span>
+                <span class="val-produto">${config.aplicacao || config.itemDescricao || "PRODUTO"}</span>
               </div>
               <div class="info-material">
                 <span class="label-prefix">FILME:</span>
-                <span class="val-material">${config.tipoFilme}</span>
+                <span class="val-material">${config.tipoFilme || "FILME"}</span>
               </div>
             </div>
             <div class="body-medidas-right">
@@ -1399,7 +1395,8 @@ export function generateZplCode(
       ? `${config.codigoOp}-${item.posicao.toString().padStart(2, "0")}`
       : (item.codigoBobina || `BOB-${item.posicao.toString().padStart(2, "0")}`);
     const hasBipagem = config.tipoCodigoBipagem !== "nenhum";
-    const clientName = (config.cliente || config.aplicacao || "").toUpperCase();
+    const clientName = (config.cliente || "CLIENTE").toUpperCase();
+    const itemName = (config.aplicacao || config.itemDescricao || "PRODUTO").toUpperCase();
     const itemNumStr = `ITEM #${item.posicao.toString().padStart(2, "0")}`;
 
     // Largura da seção de dados técnicos
@@ -1440,19 +1437,21 @@ ${config.codigoOp ? `^A0N,18,18\n^FO${xOffset + 145},18^FDOP #${config.codigoOp}
 ^A0N,16,16
 ^FO${xOffset + (hasBipagem ? 350 : 500)},18^FB${hasBipagem ? 250 : 270},1,0,R^FDDATA: ${config.dataImpressao}^FS
 ^FO${xOffset + 20},42^GB${mainWidth},2,2^FS
-^A0N,22,22
-^FO${xOffset + 20},50^FB${mainWidth - 170},1,0,L^FDCLIENTE: ${clientName}^FS
-^A0N,24,24
-^FO${xOffset + 20},80^FB${mainWidth - 170},1,0,L^FD${config.tipoFilme}^FS
+^A0N,19,19
+^FO${xOffset + 20},47^FB${mainWidth - 165},1,0,L^FDCLIENTE: ${clientName}^FS
+^A0N,19,19
+^FO${xOffset + 20},69^FB${mainWidth - 165},1,0,L^FDITEM: ${itemName}^FS
+^A0N,17,17
+^FO${xOffset + 20},91^FB${mainWidth - 165},1,0,L^FDFILME: ${config.tipoFilme}^FS
 ^A0N,14,14
-^FO${xOffset + mainWidth - 150},50^FB150,1,0,R^FDMEDIDAS^FS
-^A0N,34,34
-^FO${xOffset + mainWidth - 150},70^FB150,1,0,R^FD${config.medidas}^FS
-^FO${xOffset + 20},116^GB${mainWidth},2,2^FS
+^FO${xOffset + mainWidth - 150},47^FB150,1,0,R^FDMEDIDAS^FS
+^A0N,32,32
+^FO${xOffset + mainWidth - 150},66^FB150,1,0,R^FD${config.medidas}^FS
+^FO${xOffset + 20},114^GB${mainWidth},2,2^FS
+^A0N,22,22
+^FO${xOffset + 20},125^FD${pesoBText}^FS
 ^A0N,24,24
-^FO${xOffset + 20},128^FD${pesoBText}^FS
-^A0N,28,28
-^FO${xOffset + 300},126^FD${pesoLText}^FS${bipZpl}`;
+^FO${xOffset + 280},124^FD${pesoLText}^FS${bipZpl}`;
   };
 
   // Gerador ZPL para etiqueta 43x24mm (2 Colunas / Foto 2)
@@ -2420,15 +2419,19 @@ export function EtiquetaZebraModal({
                             </div>
                           </div>
 
-                          {/* CORPO: CLIENTE, MATERIAL & MEDIDAS */}
+                          {/* CORPO: CLIENTE, ITEM, MATERIAL & MEDIDAS */}
                           <div className="flex items-center justify-between py-0.5 my-auto gap-1.5">
                             <div className="flex-1 min-w-0">
-                              <div className="font-black text-[9.5px] tracking-tight uppercase leading-tight truncate text-slate-950 flex items-center gap-1">
-                                <span className="text-[7.5px] font-bold text-slate-500">CLIENTE:</span>
-                                <span className="truncate">{config.cliente || config.aplicacao}</span>
+                              <div className="font-black text-[9px] tracking-tight uppercase leading-tight truncate text-slate-950 flex items-center gap-1">
+                                <span className="text-[7.5px] font-bold text-slate-500 shrink-0">CLIENTE:</span>
+                                <span className="truncate">{config.cliente || "CLIENTE"}</span>
                               </div>
-                              <div className="font-bold text-[9px] tracking-wide uppercase leading-tight truncate text-slate-800 mt-0.5 flex items-center gap-1">
-                                <span className="text-[7.5px] font-bold text-slate-500">FILME:</span>
+                              <div className="font-extrabold text-[8.5px] tracking-tight uppercase leading-tight truncate text-slate-900 mt-0.5 flex items-center gap-1">
+                                <span className="text-[7.5px] font-bold text-slate-500 shrink-0">ITEM:</span>
+                                <span className="truncate">{config.aplicacao || config.itemDescricao || "PRODUTO"}</span>
+                              </div>
+                              <div className="font-bold text-[8px] tracking-wide uppercase leading-tight truncate text-slate-700 mt-0.5 flex items-center gap-1">
+                                <span className="text-[7px] font-bold text-slate-500 shrink-0">FILME:</span>
                                 <span className="truncate">{config.tipoFilme || "FILME PEBD IMP"}</span>
                               </div>
                             </div>
@@ -2951,29 +2954,33 @@ export function EtiquetaZebraModal({
                     </button>
                   </div>
 
-                  {/* CLIENTE E PRODUTO/APLICAÇÃO */}
+                  {/* CLIENTE E ITEM / PRODUTO */}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     <div>
                       <label className="block text-[10px] font-semibold text-slate-700 mb-0.5">
-                        Cliente (Identificação)
+                        Cliente (da OP)
                       </label>
                       <input
                         type="text"
                         value={config.cliente || ""}
                         onChange={(e) => updateConfig({ cliente: e.target.value.toUpperCase() })}
                         className="w-full px-2 py-1.5 bg-white border border-slate-300 rounded text-xs font-bold text-slate-900"
-                        placeholder="Ex: PIPOCA LYPE"
+                        placeholder="Nome do cliente da OP"
                       />
                     </div>
                     <div>
                       <label className="block text-[10px] font-semibold text-slate-700 mb-0.5">
-                        Produto / Aplicação
+                        Item / Produto (da OP)
                       </label>
                       <input
                         type="text"
-                        value={config.aplicacao}
-                        onChange={(e) => updateConfig({ aplicacao: e.target.value.toUpperCase() })}
+                        value={config.aplicacao || config.itemDescricao || ""}
+                        onChange={(e) => {
+                          const val = e.target.value.toUpperCase();
+                          updateConfig({ aplicacao: val, itemDescricao: val });
+                        }}
                         className="w-full px-2 py-1.5 bg-white border border-slate-300 rounded text-xs font-bold text-slate-900"
+                        placeholder="Descrição do item da OP"
                       />
                     </div>
                   </div>
