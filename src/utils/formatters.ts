@@ -24,6 +24,17 @@ export function date(value?: string): string {
   return y && m && d ? `${d}/${m}/${y}` : value;
 }
 
+export function getFullSectorDestinoName(sector?: string | null): string {
+  if (!sector) return "";
+  const s = sector.toUpperCase().trim();
+  if (s.includes("REBOB")) return "REBOBINADEIRA";
+  if (s.includes("IMP")) return "IMPRESSÃO";
+  if (s.includes("LAM")) return "LAMINAÇÃO";
+  if (s.includes("CORTE") || s.includes("SOLDA")) return "CORTE / SOLDA";
+  if (s.includes("EXTRUS")) return "EXTRUSÃO";
+  return s;
+}
+
 export function inferredCategory(order: Pick<Order, "descricaoItem" | "material" | "tipoPrazo" | "categoriaProduto">): ProductCategory {
   if (order.categoriaProduto) return order.categoriaProduto;
   const text = `${order.descricaoItem || ""} ${order.material || ""}`.toLocaleUpperCase("pt-BR");
