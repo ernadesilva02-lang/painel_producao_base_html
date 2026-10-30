@@ -618,6 +618,53 @@ function loadInsumosFromStorage(): Insumo[] {
   ];
 }
 
+export async function ensureOpInPedidosOp(
+  opId: string,
+  orderContext?: {
+    cliente?: string;
+    descricaoItem?: string;
+    material?: string;
+    quantidade?: string | number;
+  }
+): Promise<boolean> {
+  if (!opId || opId === "OP-EXT") return false;
+  try {
+    const checkRes = await fetch(
+      `${SUPABASE_URL}/rest/v1/pedidos_op?id=eq.${encodeURIComponent(opId)}&select=id`,
+      {
+        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
+      }
+    );
+    if (checkRes.ok) {
+      const existing = await checkRes.json();
+      if (Array.isArray(existing) && existing.length > 0) return true;
+    }
+
+    const insertRes = await fetch(`${SUPABASE_URL}/rest/v1/pedidos_op?select=id`, {
+      method: "POST",
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+        "Content-Type": "application/json",
+        Prefer: "resolution=merge-duplicates,return=representation",
+      },
+      body: JSON.stringify({
+        id: opId,
+        numero_op: opId.replace(/^PED-/i, ""),
+        cliente: orderContext?.cliente || "Cliente Forpack",
+        descricao_item: orderContext?.descricaoItem || "Bobina Semi-Acabada",
+        material: orderContext?.material || "PEBD",
+        quantidade_planejada_kg: Number(orderContext?.quantidade) || 0,
+        status_producao: "EM PRODUÇÃO",
+      }),
+    });
+    return insertRes.ok;
+  } catch (err) {
+    console.warn("Aviso ao sincronizar OP para pedidos_op:", err);
+    return false;
+  }
+}
+
 export async function loadActiveOps(): Promise<
   {
     id: string;
@@ -628,6 +675,18 @@ export async function loadActiveOps(): Promise<
     status_producao?: string;
   }[]
 > {
+  const map = new Map<
+    string,
+    {
+      id: string;
+      cliente: string;
+      descricao_item: string;
+      quantidade_planejada_kg: number;
+      material: string;
+      status_producao?: string;
+    }
+  >();
+
   try {
     const res = await fetch(
       `${SUPABASE_URL}/rest/v1/pedidos_op?select=id,cliente,descricao_item,quantidade_planejada_kg,material,status_producao&order=id.desc&limit=300`,
@@ -635,12 +694,61 @@ export async function loadActiveOps(): Promise<
         headers: { apikey: SUPABASE_KEY },
       }
     );
-    if (!res.ok) return [];
-    return await res.json();
+    if (res.ok) {
+      const list = await res.json();
+      if (Array.isArray(list)) {
+        list.forEach((op: any) => {
+          if (op && op.id) {
+            map.set(op.id, {
+              id: op.id,
+              cliente: op.cliente || "",
+              descricao_item: op.descricao_item || "",
+              quantidade_planejada_kg: Number(op.quantidade_planejada_kg) || 0,
+              material: op.material || "",
+              status_producao: op.status_producao || "EM PRODUÇÃO",
+            });
+          }
+        });
+      }
+    }
   } catch (e) {
     console.error("Erro em loadActiveOps:", e);
-    return [];
   }
+
+  // Carrega também as OPs persistidas em app_storage
+  try {
+    const storageRes = await fetch(
+      `${SUPABASE_URL}/rest/v1/app_storage?key=like.pedido:*&select=key,value&limit=500`,
+      {
+        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
+      }
+    );
+    if (storageRes.ok) {
+      const rows = (await storageRes.json()) as StorageRow[];
+      if (Array.isArray(rows)) {
+        for (const row of rows) {
+          try {
+            const ord = JSON.parse(row.value) as Order;
+            const opId = ord.id || row.key.replace(/^pedido:/, "");
+            if (opId && !map.has(opId)) {
+              map.set(opId, {
+                id: opId,
+                cliente: ord.cliente || "Cliente",
+                descricao_item: ord.descricaoItem || "Produto",
+                quantidade_planejada_kg: Number(ord.quantidade) || 0,
+                material: ord.material || "",
+                status_producao: ord.statusProducao || "EM PRODUÇÃO",
+              });
+            }
+          } catch {}
+        }
+      }
+    }
+  } catch (storageErr) {
+    console.warn("Aviso ao carregar OPs de app_storage:", storageErr);
+  }
+
+  return Array.from(map.values());
 }
 
 
@@ -683,7 +791,13 @@ export async function loadBobinasWIP(filters?: {
 }
 
 export async function saveBobinaWIP(
-  bobina: Partial<BobinaSemiAcabada>
+  bobina: Partial<BobinaSemiAcabada>,
+  orderContext?: {
+    cliente?: string;
+    descricaoItem?: string;
+    material?: string;
+    quantidade?: string | number;
+  }
 ): Promise<BobinaSemiAcabada> {
   const isNew = !bobina.id;
   const url = isNew
@@ -691,12 +805,22 @@ export async function saveBobinaWIP(
     : `${SUPABASE_URL}/rest/v1/estoque_semiacabados?id=eq.${encodeURIComponent(bobina.id!)}&select=*`;
 
   const method = isNew ? "POST" : "PATCH";
-  const body = {
+  const body: any = {
     ...bobina,
     updated_at: new Date().toISOString(),
   };
 
-  const response = await fetch(url, {
+  // Se for novo e possuir op_id, tenta assegurar que o registro exista em pedidos_op
+  if (isNew && body.op_id) {
+    const exists = await ensureOpInPedidosOp(body.op_id, orderContext);
+    if (!exists) {
+      // Se não conseguiu persistir em pedidos_op, define op_id como null
+      // para não violar a foreign key e garantir que a bobina seja gravada com sucesso
+      body.op_id = null;
+    }
+  }
+
+  let response = await fetch(url, {
     method,
     headers: {
       apikey: SUPABASE_KEY,
@@ -707,6 +831,27 @@ export async function saveBobinaWIP(
     body: JSON.stringify(body),
   });
 
+  // Fallback caso a constraint de foreign key 23503 seja disparada
+  if (!response.ok && body.op_id) {
+    const errText = await response.text();
+    if (errText.includes("23503") || errText.includes("foreign key")) {
+      console.warn("Foreign key constraint atingida em saveBobinaWIP, gravando com op_id = null");
+      body.op_id = null;
+      response = await fetch(url, {
+        method,
+        headers: {
+          apikey: SUPABASE_KEY,
+          Authorization: `Bearer ${SUPABASE_KEY}`,
+          "Content-Type": "application/json",
+          Prefer: "return=representation",
+        },
+        body: JSON.stringify(body),
+      });
+    } else {
+      throw new Error(`Não foi possível salvar a bobina WIP: ${errText}`);
+    }
+  }
+
   if (!response.ok) {
     const errText = await response.text();
     throw new Error(`Não foi possível salvar a bobina WIP: ${errText}`);
@@ -714,6 +859,91 @@ export async function saveBobinaWIP(
 
   const result = (await response.json()) as BobinaSemiAcabada[];
   return result[0];
+}
+
+/**
+ * Sincroniza retroativamente e de forma atômica todas as bobinas pesadas
+ * nos paletes/romaneios do setor de Extrusão para a tabela estoque_semiacabados (WIP).
+ */
+export async function syncPaletesExtrusaoToWip(): Promise<number> {
+  try {
+    const paletesRes = await fetch(
+      `${SUPABASE_URL}/rest/v1/app_storage?key=like.palete:*&select=key,value&limit=500`,
+      {
+        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
+        cache: "no-store",
+      }
+    );
+    if (!paletesRes.ok) return 0;
+    const rows = (await paletesRes.json()) as StorageRow[];
+
+    const existingWip = await loadBobinasWIP();
+    const existingBobinaNumbers = new Set(
+      existingWip.map((b) => (b.numero_bobina || "").trim().toUpperCase())
+    );
+
+    let syncedCount = 0;
+
+    for (const row of rows) {
+      try {
+        const palete = JSON.parse(row.value) as PaleteRomaneio;
+        const isExtrusaoPal = (palete.setor || "").toUpperCase().includes("EXTRUS");
+        if (!isExtrusaoPal || !Array.isArray(palete.itens) || palete.itens.length === 0) {
+          continue;
+        }
+
+        const palId = palete.numeroPalete || palete.id;
+        const opId = palete.opId || palete.numeroOp || palete.numeroPedido || "";
+
+        let parsedLarg: number | null = null;
+        let parsedEsp: number | null = null;
+        if (palete.medidas) {
+          const parts = palete.medidas.split(/[xX*]/);
+          if (parts.length >= 2) {
+            const l = parseFloat(parts[0].replace(",", "."));
+            const e = parseFloat(parts[1].replace(",", "."));
+            if (!isNaN(l) && l > 0) parsedLarg = l;
+            if (!isNaN(e) && e > 0) parsedEsp = e < 1 ? Math.round(e * 1000) : e;
+          }
+        }
+
+        for (const item of palete.itens) {
+          const codBobina = item.codigoBobina || `BOB-${item.posicao.toString().padStart(2, "0")}`;
+          const numBobinaFull = `${palId}-${codBobina}`.trim().toUpperCase();
+
+          if (!existingBobinaNumbers.has(numBobinaFull)) {
+            await saveBobinaWIP(
+              {
+                op_id: opId || undefined,
+                numero_bobina: `${palId}-${codBobina}`,
+                setor_origem: "EXTRUSÃO",
+                setor_destino: palete.setorDestino || "IMPRESSÃO",
+                peso_liquido_kg: item.pesoLiquido || item.pesoBruto,
+                largura_mm: parsedLarg,
+                espessura_micras: parsedEsp,
+                status: "DISPONIVEL",
+                data_fabricacao: palete.data || new Date().toISOString().slice(0, 10),
+                operador: palete.operador || "Operador Extrusão",
+              },
+              {
+                cliente: palete.cliente,
+                descricaoItem: palete.descricaoItem,
+              }
+            );
+            existingBobinaNumbers.add(numBobinaFull);
+            syncedCount++;
+          }
+        }
+      } catch (itemErr) {
+        console.warn("Aviso ao sincronizar bobina de palete para WIP:", itemErr);
+      }
+    }
+
+    return syncedCount;
+  } catch (err) {
+    console.error("Erro em syncPaletesExtrusaoToWip:", err);
+    return 0;
+  }
 }
 
 export async function updateStatusBobinaWIP(
