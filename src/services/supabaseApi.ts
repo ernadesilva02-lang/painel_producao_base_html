@@ -790,6 +790,8 @@ export async function loadBobinasWIP(filters?: {
   }
 }
 
+let syncPaletesPromise: Promise<number> | null = null;
+
 export async function saveBobinaWIP(
   bobina: Partial<BobinaSemiAcabada>,
   orderContext?: {
@@ -799,23 +801,43 @@ export async function saveBobinaWIP(
     quantidade?: string | number;
   }
 ): Promise<BobinaSemiAcabada> {
-  const isNew = !bobina.id;
+  let existingId = bobina.id;
+
+  // Se não possui ID direto mas tem numero_bobina, verifica se já existe no banco
+  // para garantir unicidade e evitar qualquer duplicidade
+  if (!existingId && bobina.numero_bobina) {
+    try {
+      const checkRes = await fetch(
+        `${SUPABASE_URL}/rest/v1/estoque_semiacabados?numero_bobina=eq.${encodeURIComponent(bobina.numero_bobina.trim())}&select=id,status&limit=1`,
+        { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }, cache: "no-store" }
+      );
+      if (checkRes.ok) {
+        const found = (await checkRes.json()) as { id: string }[];
+        if (found && found.length > 0) {
+          existingId = found[0].id;
+        }
+      }
+    } catch (e) {
+      console.warn("Erro ao verificar duplicidade de bobina WIP:", e);
+    }
+  }
+
+  const isNew = !existingId;
   const url = isNew
     ? `${SUPABASE_URL}/rest/v1/estoque_semiacabados?select=*`
-    : `${SUPABASE_URL}/rest/v1/estoque_semiacabados?id=eq.${encodeURIComponent(bobina.id!)}&select=*`;
+    : `${SUPABASE_URL}/rest/v1/estoque_semiacabados?id=eq.${encodeURIComponent(existingId!)}&select=*`;
 
   const method = isNew ? "POST" : "PATCH";
   const body: any = {
     ...bobina,
     updated_at: new Date().toISOString(),
   };
+  delete body.id; // Evita conflito de chave primária no payload
 
   // Se for novo e possuir op_id, tenta assegurar que o registro exista em pedidos_op
   if (isNew && body.op_id) {
     const exists = await ensureOpInPedidosOp(body.op_id, orderContext);
     if (!exists) {
-      // Se não conseguiu persistir em pedidos_op, define op_id como null
-      // para não violar a foreign key e garantir que a bobina seja gravada com sucesso
       body.op_id = null;
     }
   }
@@ -866,21 +888,26 @@ export async function saveBobinaWIP(
  * nos paletes/romaneios do setor de Extrusão para a tabela estoque_semiacabados (WIP).
  */
 export async function syncPaletesExtrusaoToWip(): Promise<number> {
-  try {
-    const paletesRes = await fetch(
-      `${SUPABASE_URL}/rest/v1/app_storage?key=like.palete:*&select=key,value&limit=500`,
-      {
-        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
-        cache: "no-store",
-      }
-    );
-    if (!paletesRes.ok) return 0;
-    const rows = (await paletesRes.json()) as StorageRow[];
+  if (syncPaletesPromise) {
+    return syncPaletesPromise;
+  }
 
-    const existingWip = await loadBobinasWIP();
-    const existingBobinaNumbers = new Set(
-      existingWip.map((b) => (b.numero_bobina || "").trim().toUpperCase())
-    );
+  syncPaletesPromise = (async () => {
+    try {
+      const paletesRes = await fetch(
+        `${SUPABASE_URL}/rest/v1/app_storage?key=like.palete:*&select=key,value&limit=500`,
+        {
+          headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
+          cache: "no-store",
+        }
+      );
+      if (!paletesRes.ok) return 0;
+      const rows = (await paletesRes.json()) as StorageRow[];
+
+      const existingWip = await loadBobinasWIP();
+      const existingBobinaNumbers = new Set(
+        existingWip.map((b) => (b.numero_bobina || "").trim().toUpperCase())
+      );
 
     let syncedCount = 0;
 
@@ -940,10 +967,15 @@ export async function syncPaletesExtrusaoToWip(): Promise<number> {
     }
 
     return syncedCount;
-  } catch (err) {
-    console.error("Erro em syncPaletesExtrusaoToWip:", err);
-    return 0;
-  }
+    } catch (err) {
+      console.error("Erro em syncPaletesExtrusaoToWip:", err);
+      return 0;
+    } finally {
+      syncPaletesPromise = null;
+    }
+  })();
+
+  return syncPaletesPromise;
 }
 
 export async function updateStatusBobinaWIP(
