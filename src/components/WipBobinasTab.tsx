@@ -140,7 +140,14 @@ export function WipBobinasTab({ onShowNotification }: WipBobinasTabProps) {
           setBobinas([]);
         }
       } else {
-        setBobinas(wipList);
+        const seen = new Set<string>();
+        const uniqueWip = wipList.filter((b) => {
+          const key = (b.numero_bobina || b.id || "").trim().toUpperCase();
+          if (!key || seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+        setBobinas(uniqueWip);
       }
 
       setActiveOps(opsList);
@@ -254,7 +261,13 @@ export function WipBobinasTab({ onShowNotification }: WipBobinasTabProps) {
       }
 
       setBobinas(prev => {
-        const idx = prev.findIndex(b => b.id === saved.id);
+        const idx = prev.findIndex(
+          (b) =>
+            b.id === saved.id ||
+            (saved.numero_bobina &&
+              b.numero_bobina &&
+              b.numero_bobina.trim().toUpperCase() === saved.numero_bobina.trim().toUpperCase())
+        );
         if (idx >= 0) {
           const next = [...prev];
           next[idx] = saved;
