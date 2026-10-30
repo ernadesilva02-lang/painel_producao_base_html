@@ -43,7 +43,13 @@ import {
   group,
   findOrderForPalete,
   isMachineMatch,
+  getFullSectorDestinoName,
 } from "../utils/formatters";
+import {
+  saveBobinaWIP,
+  deleteBobinaWIP,
+  syncPaletesExtrusaoToWip,
+} from "../services/supabaseApi";
 import {
   EtiquetaZebraModal,
   printEtiquetasZebra,
@@ -138,6 +144,17 @@ interface PaleteRomaneioModalProps {
   totals?: Map<string, Totals>;
 }
 
+// Extrai medidas/tamanho inicial a partir da descrição ou campos técnicos da OP (ex: 40X0,070 ou 54X0,08)
+export function extractMedidasFromOrder(order?: Order | null): string {
+  if (!order) return "";
+  const desc = order.descricaoItem || "";
+  const match = desc.match(/(\d+(?:[.,]\d+)?\s*[xX*]\s*\d+(?:[.,]\d+)?)/);
+  if (match) {
+    return match[1].replace(/\s+/g, "").toUpperCase();
+  }
+  return "";
+}
+
 export function PaleteRomaneioModal({
   isOpen,
   onClose,
@@ -202,6 +219,17 @@ export function PaleteRomaneioModal({
     resolveMachine(machine, initialPalete, activeOrder, machines)
   );
 
+  const isExtrusao = Boolean(
+    (selectedMachine?.setor || initialPalete?.setor || machine?.setor || "").toUpperCase().includes("EXTRUS")
+  );
+
+  const [setorDestino, setSetorDestino] = useState<string>(() => {
+    if (initialPalete?.setorDestino) return getFullSectorDestinoName(initialPalete.setorDestino);
+    const s = (selectedMachine?.setor || machine?.setor || "").toUpperCase();
+    if (s.includes("EXTRUS")) return "IMPRESSÃO";
+    return "";
+  });
+
   const [numeroPalete, setNumeroPalete] = useState("");
   const [dataPalete, setDataPalete] = useState(() =>
     new Date().toLocaleDateString("en-CA", { timeZone: "America/Fortaleza" })
@@ -209,6 +237,11 @@ export function PaleteRomaneioModal({
   const [turno, setTurno] = useState("1º Turno (06h - 14h)");
   const [operador, setOperador] = useState(operators[0] || "");
   const [auxiliar, setAuxiliar] = useState("");
+  // Tamanho/Medidas da bobina digitado pelo operador na Extrusão (enviado para o campo 'medidas' das etiquetas Zebra)
+  const [medidasBobina, setMedidasBobina] = useState<string>(() => {
+    if (initialPalete?.medidas) return initialPalete.medidas;
+    return extractMedidasFromOrder(activeOrder);
+  });
   const [taraPadrao, setTaraPadrao] = useState(1.6); // 1.6 kg standard tubete tare
   const [status, setStatus] = useState<StatusPalete>("ABERTO");
   const [observacoes, setObservacoes] = useState("");
@@ -334,6 +367,9 @@ export function PaleteRomaneioModal({
     setSelectedOrder(order);
     setIsOpSearchOpen(false);
     setOpSearchQuery("");
+    if (!medidasBobina || medidasBobina === extractMedidasFromOrder(selectedOrder)) {
+      setMedidasBobina(extractMedidasFromOrder(order));
+    }
     if (!initialPalete) {
       const opNum = order.numeroOp || order.numeroPedido || "OP";
       const randomSeq = Math.floor(1 + Math.random() * 99)
@@ -364,6 +400,11 @@ export function PaleteRomaneioModal({
       setTurno(initialPalete.turno || "1º Turno (06h - 14h)");
       setOperador(initialPalete.operador || operators[0] || "");
       setAuxiliar(initialPalete.auxiliar || "");
+      if (initialPalete.medidas) {
+        setMedidasBobina(initialPalete.medidas);
+      } else {
+        setMedidasBobina(extractMedidasFromOrder(findOrderForPalete(orders, initialPalete)));
+      }
       setTaraPadrao(initialPalete.taraPadraoTubete || 1.6);
       setStatus(initialPalete.status || "ABERTO");
       setObservacoes(initialPalete.observacoes || "");
@@ -388,6 +429,13 @@ export function PaleteRomaneioModal({
       // Sincroniza a máquina vinculada ao palete
       const machResolved = resolveMachine(machine, initialPalete, foundOrder, machines);
       setSelectedMachine(machResolved);
+      if (initialPalete.setorDestino) {
+        setSetorDestino(getFullSectorDestinoName(initialPalete.setorDestino));
+      } else if ((machResolved.setor || "").toUpperCase().includes("EXTRUS")) {
+        setSetorDestino("IMPRESSÃO");
+      } else {
+        setSetorDestino("");
+      }
     } else {
       // Novo palete: gera id estável e dados iniciais
       const newId = `palete-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -406,6 +454,7 @@ export function PaleteRomaneioModal({
       setTurno("1º Turno (06h - 14h)");
       setOperador(operators[0] || "");
       setAuxiliar("");
+      setMedidasBobina(extractMedidasFromOrder(activeOrder));
       setTaraPadrao(1.6);
       setStatus("ABERTO");
       setObservacoes("");
@@ -413,6 +462,11 @@ export function PaleteRomaneioModal({
       setSelectedOrder(activeOrder || null);
       const machResolved = resolveMachine(machine, null, activeOrder, machines);
       setSelectedMachine(machResolved);
+      if ((machResolved.setor || "").toUpperCase().includes("EXTRUS")) {
+        setSetorDestino("IMPRESSÃO");
+      } else {
+        setSetorDestino("");
+      }
     }
 
     setInputBruto("");
@@ -478,14 +532,16 @@ export function PaleteRomaneioModal({
       numeroOp: op?.numeroOp || initialPalete?.numeroOp || "",
       numeroPedido: op?.numeroPedido || initialPalete?.numeroPedido || "",
       cliente: op?.cliente || initialPalete?.cliente || "FORPACK CLIENTE",
-      descricaoItem: op?.descricaoItem || initialPalete?.descricaoItem || "PRODUTO ACABADO",
+      descricaoItem: op?.descricaoItem || initialPalete?.descricaoItem || (isExtrusao ? "BOBINA SEMI-ACABADA" : "PRODUTO ACABADO"),
       maquinaId: selectedMachine.id,
       maquinaNome: selectedMachine.name,
-      setor: selectedMachine.setor || "REBOBINADEIRA",
+      setor: selectedMachine.setor || (isExtrusao ? "EXTRUSÃO" : "REBOBINADEIRA"),
+      setorDestino: isExtrusao ? (setorDestino || "IMPRESSÃO") : (initialPalete?.setorDestino || undefined),
+      medidas: isExtrusao ? (medidasBobina.trim() || undefined) : undefined,
       data: dataPalete,
       turno,
       operador: operador.trim() || initialPalete?.operador || "Operador",
-      auxiliar: auxiliar.trim() || initialPalete?.auxiliar || undefined,
+      auxiliar: isExtrusao ? undefined : (auxiliar.trim() || initialPalete?.auxiliar || undefined),
       taraPadraoTubete: taraPadrao,
       itens: itemsToUse,
       totalVolumes: itemsToUse.length,
@@ -564,8 +620,8 @@ export function PaleteRomaneioModal({
     onClose();
   };
 
-  // Add item from fast weighing input com auto-salvamento imediato
-  const handleAddBobina = () => {
+  // Add item from fast weighing input com auto-salvamento imediato e registro de saldo WIP para Extrusão
+  const handleAddBobina = async () => {
     const bruto = parseFloat(inputBruto.replace(",", "."));
     if (isNaN(bruto) || bruto <= 0) {
       setErrorMsg("Informe um peso bruto válido para a bobina (kg).");
@@ -589,13 +645,64 @@ export function PaleteRomaneioModal({
       minute: "2-digit",
     });
 
+    const codBobina = `BOB-${nextPos.toString().padStart(2, "0")}`;
+
+    // Se for Extrusão, cria o saldo intermediário em estoque_semiacabados (WIP)
+    let createdWipId: string | undefined = undefined;
+    if (isExtrusao) {
+      try {
+        const opId = selectedOrder?.id || selectedOrder?.numeroOp || selectedOrder?.numeroPedido || initialPalete?.numeroOp || "OP-EXT";
+        const palId = numeroPalete.trim() || paleteId;
+        const codBobinaCompleto = `${palId}-${codBobina}`;
+
+        let parsedLarg: number | null = selectedOrder?.largura ? Number(selectedOrder.largura) : null;
+        let parsedEsp: number | null = selectedOrder?.espessura ? Number(selectedOrder.espessura) : null;
+        if (medidasBobina) {
+          const parts = medidasBobina.split(/[xX*]/);
+          if (parts.length >= 2) {
+            const l = parseFloat(parts[0].replace(",", "."));
+            const e = parseFloat(parts[1].replace(",", "."));
+            if (!isNaN(l) && l > 0) parsedLarg = l;
+            if (!isNaN(e) && e > 0) parsedEsp = e < 1 ? Math.round(e * 1000) : e;
+          }
+        }
+
+        const wipRecord = await saveBobinaWIP(
+          {
+            op_id: opId,
+            numero_bobina: codBobinaCompleto,
+            setor_origem: "EXTRUSÃO",
+            setor_destino: setorDestino || "IMPRESSÃO",
+            peso_liquido_kg: liquido,
+            largura_mm: parsedLarg,
+            espessura_micras: parsedEsp,
+            status: "DISPONIVEL",
+            data_fabricacao: dataPalete,
+            operador: operador.trim() || "Operador Extrusão",
+          },
+          {
+            cliente: selectedOrder?.cliente,
+            descricaoItem: selectedOrder?.descricaoItem,
+            material: selectedOrder?.material,
+            quantidade: selectedOrder?.quantidade,
+          }
+        );
+        if (wipRecord && wipRecord.id) {
+          createdWipId = wipRecord.id;
+        }
+      } catch (wipErr) {
+        console.error("Erro ao salvar bobina WIP no estoque semi-acabado:", wipErr);
+      }
+    }
+
     const newItem: ItemPaleteRomaneio = {
       posicao: nextPos,
       pesoBruto: Math.round(bruto * 100) / 100,
       tara: Math.round(tara * 100) / 100,
       pesoLiquido: liquido,
-      codigoBobina: `BOB-${nextPos.toString().padStart(2, "0")}`,
+      codigoBobina: codBobina,
       horario: nowTime,
+      wipId: createdWipId,
     };
 
     const updatedItens = [...itens, newItem];
@@ -608,7 +715,9 @@ export function PaleteRomaneioModal({
     const paleteToSave = buildPaleteObject(updatedItens, "ABERTO");
     persistPalete(
       paleteToSave,
-      `Bobina #${nextPos} adicionada: ${liquido.toFixed(1)} kg líquido (Salvo automaticamente)`
+      isExtrusao
+        ? `Bobina Extrusão #${nextPos} adicionada: ${liquido.toFixed(1)} kg líq. • Saldo WIP (${setorDestino || 'IMPRESSÃO'}) gerado!`
+        : `Bobina #${nextPos} adicionada: ${liquido.toFixed(1)} kg líquido (Salvo automaticamente)`
     );
 
     // Impressão ou geração automática de arquivo na Zebra se a opção estiver ligada pelo operador
@@ -643,6 +752,13 @@ export function PaleteRomaneioModal({
   };
 
   const handleRemoveItem = (posicao: number) => {
+    const itemToRemove = itens.find((i) => i.posicao === posicao);
+    if (itemToRemove?.wipId) {
+      deleteBobinaWIP(itemToRemove.wipId).catch((err) =>
+        console.warn("Aviso ao remover bobina WIP do estoque:", err)
+      );
+    }
+
     const updatedItens = itens
       .filter((i) => i.posicao !== posicao)
       .map((item, idx) => ({
@@ -733,6 +849,14 @@ export function PaleteRomaneioModal({
       const paleteFechado = buildPaleteObject(itens, "FECHADO");
       await onClosePaleteAndRegister(paleteFechado, selectedOrder, machToUse);
 
+      if (isExtrusao) {
+        try {
+          await syncPaletesExtrusaoToWip();
+        } catch (syncErr) {
+          console.warn("Aviso na sincronização ao fechar palete de Extrusão:", syncErr);
+        }
+      }
+
       // Limpa rascunho temporário do localStorage pois o palete foi oficialmente fechado
       try {
         localStorage.removeItem(`forpack_draft_palete_${paleteFechado.id}`);
@@ -778,13 +902,19 @@ export function PaleteRomaneioModal({
         {/* CABEÇALHO DO MODAL (Estilo Padrão Forpack Pedidos/OP) */}
         <div className="bg-slate-900 text-white px-5 sm:px-6 py-4 flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 shrink-0">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-lg bg-blue-600/30 border border-blue-500/40 flex items-center justify-center text-blue-400 shrink-0">
-              <Layers className="w-5 h-5" />
+            <div className={`w-10 h-10 rounded-lg flex items-center justify-center shrink-0 border ${
+              isExtrusao
+                ? "bg-amber-600/30 border-amber-500/40 text-amber-400"
+                : "bg-blue-600/30 border-blue-500/40 text-blue-400"
+            }`}>
+              {isExtrusao ? <Flame className="w-5 h-5 text-amber-400" /> : <Layers className="w-5 h-5" />}
             </div>
             <div>
               <div className="flex items-center gap-2 flex-wrap">
-                <span className="text-[11px] font-bold uppercase tracking-wider text-blue-400">
-                  {selectedMachine.name} • PRODUTO ACABADO
+                <span className={`text-[11px] font-bold uppercase tracking-wider ${
+                  isExtrusao ? "text-amber-400" : "text-blue-400"
+                }`}>
+                  {selectedMachine.name} • {isExtrusao ? "EXTRUSÃO (BOBINAS SEMI-ACABADAS WIP)" : "PRODUTO ACABADO"}
                 </span>
                 <span
                   className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
@@ -793,7 +923,7 @@ export function PaleteRomaneioModal({
                       : "bg-amber-500/20 text-amber-300 border border-amber-500/30"
                   }`}
                 >
-                  {status === "FECHADO" ? "PALETE FECHADO" : "EM MONTAGEM"}
+                  {status === "FECHADO" ? (isExtrusao ? "LOTE FECHADO" : "PALETE FECHADO") : "EM MONTAGEM"}
                 </span>
                 {selectedOrder && (
                   <span className="text-[10px] font-mono bg-slate-800 text-slate-300 px-2 py-0.5 rounded border border-slate-700 font-semibold">
@@ -818,7 +948,9 @@ export function PaleteRomaneioModal({
                 ) : null}
               </div>
               <h2 className="text-lg font-bold text-white tracking-tight">
-                Romaneio de Palete & Fechamento de Produção
+                {isExtrusao
+                  ? "Lote / Romaneio de Extrusão & Apontamento de Bobinas"
+                  : "Romaneio de Palete & Fechamento de Produção"}
               </h2>
             </div>
           </div>
@@ -1259,7 +1391,7 @@ export function PaleteRomaneioModal({
                 {/* MÁQUINA */}
                 <div className="col-span-2 sm:col-span-2">
                   <label className="text-[11px] font-bold text-slate-700 uppercase tracking-wide block mb-1">
-                    Máquina (Rebobinadeira / Acabamento)
+                    {isExtrusao ? "Máquina (Extrusora)" : "Máquina (Rebobinadeira / Acabamento)"}
                   </label>
                   <select
                     value={selectedMachine.id}
@@ -1267,7 +1399,7 @@ export function PaleteRomaneioModal({
                       const found = machines.find((m) => m.id === e.target.value) || {
                         id: e.target.value,
                         name: e.target.value,
-                        setor: "REBOBINADEIRA",
+                        setor: isExtrusao ? "EXTRUSÃO" : "REBOBINADEIRA",
                       };
                       setSelectedMachine(found);
                     }}
@@ -1305,16 +1437,71 @@ export function PaleteRomaneioModal({
 
                 <div className="col-span-1 sm:col-span-1">
                   <label className="text-[11px] font-bold text-slate-700 uppercase tracking-wide block mb-1">
-                    Auxiliar de Produção
+                    {isExtrusao ? "Tamanho da Bobina (Medidas)" : "Auxiliar de Produção"}
                   </label>
-                  <input
-                    type="text"
-                    value={auxiliar}
-                    onChange={(e) => setAuxiliar(e.target.value)}
-                    placeholder="Ex: Nome do auxiliar no palete"
-                    className="w-full bg-white border border-slate-300 rounded-md px-2.5 py-1.5 text-xs text-slate-900 focus:ring-2 focus:ring-blue-500"
-                  />
+                  {isExtrusao ? (
+                    <input
+                      type="text"
+                      value={medidasBobina}
+                      onChange={(e) => setMedidasBobina(e.target.value)}
+                      placeholder="Ex: 40X0,070"
+                      className="w-full bg-white border border-slate-300 rounded-md px-2.5 py-1.5 text-xs font-bold text-slate-900 focus:ring-2 focus:ring-amber-500 uppercase placeholder:normal-case placeholder:font-normal"
+                      title="Tamanho da bobina que será enviado para o campo Medidas na etiqueta Zebra (ex: 40X0,070)"
+                    />
+                  ) : (
+                    <input
+                      type="text"
+                      value={auxiliar}
+                      onChange={(e) => setAuxiliar(e.target.value)}
+                      placeholder="Ex: Nome do auxiliar no palete"
+                      className="w-full bg-white border border-slate-300 rounded-md px-2.5 py-1.5 text-xs text-slate-900 focus:ring-2 focus:ring-blue-500"
+                    />
+                  )}
                 </div>
+
+                {/* SELETOR DE DESTINO DA BOBINA EXTRUSADA (SEMI-ACABADA) */}
+                {isExtrusao && (
+                  <div className="col-span-2 sm:col-span-4 bg-amber-50/90 border border-amber-300 rounded-lg p-3 space-y-1.5">
+                    <div className="flex items-center justify-between flex-wrap gap-1">
+                      <span className="text-[11px] font-black text-amber-950 uppercase tracking-wide flex items-center gap-1.5">
+                        <Flame className="w-3.5 h-3.5 text-amber-600" />
+                        Próximo Setor / Destino da Bobina Semi-Acabada
+                      </span>
+                      <span className="text-[10px] font-bold text-emerald-800 bg-emerald-100 border border-emerald-300 px-2 py-0.5 rounded-full flex items-center gap-1">
+                        <Check className="w-3 h-3 text-emerald-600 stroke-[3]" />
+                        Gera Saldo WIP no Estoque
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-amber-800 font-medium">
+                      Selecione o setor de destino para onde a bobina extrusada será enviada (impresso na etiqueta 100x30 mm e QR Code):
+                    </p>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 pt-1">
+                      {[
+                        { id: "IMPRESSÃO", label: "Impressão", color: "bg-purple-50 text-purple-800 border-purple-200", activeColor: "bg-purple-600 text-white border-purple-700 shadow-xs" },
+                        { id: "LAMINAÇÃO", label: "Laminação", color: "bg-sky-50 text-sky-800 border-sky-200", activeColor: "bg-sky-600 text-white border-sky-700 shadow-xs" },
+                        { id: "REBOBINADEIRA", label: "Rebobinadeira", color: "bg-emerald-50 text-emerald-800 border-emerald-200", activeColor: "bg-emerald-600 text-white border-emerald-700 shadow-xs" },
+                        { id: "CORTE / SOLDA", label: "Corte / Solda", color: "bg-rose-50 text-rose-800 border-rose-200", activeColor: "bg-rose-600 text-white border-rose-700 shadow-xs" },
+                      ].map((dest) => {
+                        const isSelected = getFullSectorDestinoName(setorDestino || "IMPRESSÃO") === dest.id;
+                        return (
+                          <button
+                            key={dest.id}
+                            type="button"
+                            onClick={() => setSetorDestino(getFullSectorDestinoName(dest.id))}
+                            className={`px-2.5 py-1.5 rounded-md text-xs font-bold border transition flex items-center justify-center gap-1.5 cursor-pointer ${
+                              isSelected
+                                ? `${dest.activeColor} scale-[1.02]`
+                                : `${dest.color} hover:bg-slate-100`
+                            }`}
+                          >
+                            {isSelected && <Check className="w-3 h-3 stroke-[3]" />}
+                            <span>{dest.label}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* ESTAÇÃO DE PESAGEM RÁPIDA (CHÃO DE FÁBRICA / BALANÇA) */}
@@ -1858,7 +2045,7 @@ export function PaleteRomaneioModal({
                 disabled={saving}
                 className="px-4 py-3 text-xs font-semibold text-rose-600 hover:bg-rose-50 rounded-xl border border-rose-200 transition cursor-pointer"
               >
-                Excluir Palete
+                {isExtrusao ? "Excluir Lote" : "Excluir Palete"}
               </button>
             )}
             <button
@@ -1867,7 +2054,7 @@ export function PaleteRomaneioModal({
               disabled={saving}
               className="px-5 py-3 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded-xl text-xs font-bold shadow-xs transition cursor-pointer"
             >
-              Salvar em Montagem
+              {isExtrusao ? "Salvar Lote em Aberto" : "Salvar em Montagem"}
             </button>
           </div>
 
@@ -1900,10 +2087,14 @@ export function PaleteRomaneioModal({
                 type="button"
                 onClick={handleCloseAndPrint}
                 disabled={saving || isClosingRef.current || itens.length === 0}
-                className="px-7 py-3.5 bg-blue-600 hover:bg-blue-500 active:scale-98 text-white rounded-xl text-sm font-black shadow-lg hover:shadow-blue-500/25 transition flex items-center justify-center gap-2.5 cursor-pointer disabled:opacity-50"
+                className={`px-7 py-3.5 active:scale-98 text-white rounded-xl text-sm font-black shadow-lg transition flex items-center justify-center gap-2.5 cursor-pointer disabled:opacity-50 ${
+                  isExtrusao
+                    ? "bg-amber-600 hover:bg-amber-500 hover:shadow-amber-500/25"
+                    : "bg-blue-600 hover:bg-blue-500 hover:shadow-blue-500/25"
+                }`}
               >
                 <Printer className="w-5 h-5" />
-                <span>Fechar Palete & Imprimir Romaneio</span>
+                <span>{isExtrusao ? "Fechar Lote de Extrusão & Imprimir Romaneio" : "Fechar Palete & Imprimir Romaneio"}</span>
               </button>
             )}
           </div>
@@ -2168,12 +2359,12 @@ export function printOfficialRomaneio(palete: PaleteRomaneio) {
     </div>
 
     <div class="title-bar">
-      ROMANEIO DE PALETE · PRODUTO ACABADO
+      ${(palete.setor || '').toUpperCase().includes('EXTRUS') ? 'ROMANEIO DE BOBINAS SEMI-ACABADAS · EXTRUSÃO' : 'ROMANEIO DE PALETE · PRODUTO ACABADO'}
     </div>
 
     <div class="info-grid">
       <div class="info-item">
-        <div>PALETE: <strong>${palete.numeroPalete}</strong></div>
+        <div>${(palete.setor || '').toUpperCase().includes('EXTRUS') ? 'LOTE / PALETE:' : 'PALETE:'} <strong>${palete.numeroPalete}</strong></div>
         <div>CLIENTE: <strong>${palete.cliente}</strong></div>
         <div>PRODUTO: <strong>${palete.descricaoItem}</strong></div>
       </div>
@@ -2181,12 +2372,13 @@ export function printOfficialRomaneio(palete: PaleteRomaneio) {
         <div>OP: <strong>#${palete.numeroOp || palete.opId}</strong></div>
         <div>MÁQUINA: <strong>${palete.maquinaNome || palete.maquinaId}</strong></div>
         <div>SETOR: <strong>${palete.setor}</strong></div>
+        ${palete.setorDestino ? `<div>DESTINO: <strong>${getFullSectorDestinoName(palete.setorDestino)}</strong></div>` : ""}
       </div>
       <div class="info-item">
         <div>DATA: <strong>${palete.data ? new Date(palete.data + "T12:00:00").toLocaleDateString("pt-BR") : new Date().toLocaleDateString("pt-BR")}</strong></div>
         <div>TURNO: <strong>${palete.turno || "1º Turno"}</strong></div>
         <div>OPERADOR: <strong>${palete.operador || "—"}</strong></div>
-        ${palete.auxiliar ? `<div>AUXILIAR: <strong>${palete.auxiliar}</strong></div>` : ""}
+        ${palete.medidas ? `<div>MEDIDAS: <strong>${palete.medidas}</strong></div>` : (palete.auxiliar ? `<div>AUXILIAR: <strong>${palete.auxiliar}</strong></div>` : "")}
       </div>
     </div>
 

@@ -12,6 +12,7 @@ import {
   deleteBobinaWIP,
   loadActiveOps,
   saveMovimentacaoEstoque,
+  syncPaletesExtrusaoToWip,
 } from "../services/supabaseApi";
 import {
   Package,
@@ -73,6 +74,13 @@ export function WipBobinasTab({ onShowNotification }: WipBobinasTabProps) {
   const loadData = async () => {
     setLoading(true);
     try {
+      // Sincroniza automaticamente paletes e bobinas pesadas na Extrusão para o estoque WIP
+      try {
+        await syncPaletesExtrusaoToWip();
+      } catch (syncErr) {
+        console.warn("Aviso ao sincronizar paletes de Extrusão:", syncErr);
+      }
+
       const [wipList, opsList] = await Promise.all([
         loadBobinasWIP(),
         loadActiveOps(),
@@ -152,11 +160,17 @@ export function WipBobinasTab({ onShowNotification }: WipBobinasTabProps) {
   const opMap = useMemo(() => {
     const map = new Map<string, { cliente: string; descricao_item: string; material: string }>();
     activeOps.forEach(op => {
-      map.set(op.id, {
+      const info = {
         cliente: op.cliente,
         descricao_item: op.descricao_item,
         material: op.material,
-      });
+      };
+      map.set(op.id, info);
+      if (op.id.startsWith("PED-")) {
+        map.set(op.id.replace(/^PED-/, ""), info);
+      } else {
+        map.set(`PED-${op.id}`, info);
+      }
     });
     return map;
   }, [activeOps]);
@@ -570,7 +584,7 @@ export function WipBobinasTab({ onShowNotification }: WipBobinasTabProps) {
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-1.5">
                           <span className="px-1.5 py-0.5 rounded text-xs font-semibold bg-slate-100 text-slate-800 border border-slate-200">
-                            OP #{bobina.op_id}
+                            {bobina.op_id ? `OP #${bobina.op_id}` : "OP Extrusão"}
                           </span>
                         </div>
                         <div className="font-medium text-slate-700 text-xs mt-0.5 truncate max-w-[200px]" title={opInfo?.cliente}>

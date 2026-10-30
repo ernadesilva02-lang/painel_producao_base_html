@@ -1505,17 +1505,33 @@ export function DailyLaunches({
                         <span>Apontar Produção</span>
                       </button>
 
-                      {isRebobinadeira ? (
+                      {isRebobinadeira || isExtrusao ? (
                         <div className="flex items-center gap-1.5">
                           <button
                             type="button"
                             onClick={() => handleOpenPaleteModal(openPalete || null, machine, openPalete ? null : activeOrder)}
-                            className="h-8.5 px-2.5 bg-white hover:bg-blue-50 text-blue-700 border border-blue-200 rounded-md text-xs font-semibold transition flex items-center justify-center gap-1 cursor-pointer shadow-2xs active:scale-95"
-                            title="Montar palete de produto acabado com romaneio impresso"
+                            className={`h-8.5 px-2.5 bg-white rounded-md text-xs font-semibold transition flex items-center justify-center gap-1 cursor-pointer shadow-2xs active:scale-95 ${
+                              isExtrusao
+                                ? "hover:bg-amber-50 text-amber-800 border border-amber-300"
+                                : "hover:bg-blue-50 text-blue-700 border border-blue-200"
+                            }`}
+                            title={isExtrusao ? "Pesar bobinas da extrusão, emitir etiquetas 100x30 mm e gerar saldo WIP no estoque" : "Montar palete de produto acabado com romaneio impresso"}
                           >
-                            <Layers size={13} className="text-blue-600" />
-                            <span className="hidden sm:inline">{openPalete ? "Continuar Palete" : "Montar Palete"}</span>
-                            <span className="sm:hidden">Palete</span>
+                            {isExtrusao ? (
+                              <Flame size={13} className="text-amber-600" />
+                            ) : (
+                              <Layers size={13} className="text-blue-600" />
+                            )}
+                            <span className="hidden sm:inline">
+                              {openPalete
+                                ? isExtrusao
+                                  ? "Continuar Lote"
+                                  : "Continuar Palete"
+                                : isExtrusao
+                                ? "Pesar Lote Extrusão"
+                                : "Montar Palete"}
+                            </span>
+                            <span className="sm:hidden">{isExtrusao ? "Lote Ext" : "Palete"}</span>
                           </button>
 
                           {lastClosedPalete && (
@@ -1523,7 +1539,7 @@ export function DailyLaunches({
                               type="button"
                               onClick={() => printOfficialRomaneio(lastClosedPalete)}
                               className="h-8.5 px-2 bg-white hover:bg-slate-50 text-slate-600 border border-slate-200 rounded-md text-xs font-medium transition flex items-center justify-center cursor-pointer shadow-2xs active:scale-95"
-                              title={`Reimprimir romaneio do palete ${lastClosedPalete.numeroPalete}`}
+                              title={`Reimprimir romaneio do lote/palete ${lastClosedPalete.numeroPalete}`}
                             >
                               <Printer size={13} />
                             </button>
@@ -1540,16 +1556,6 @@ export function DailyLaunches({
                             </button>
                           )}
                         </div>
-                      ) : isExtrusao ? (
-                        <button
-                          type="button"
-                          onClick={() => handleOpenLaunchModal(machine, activeOrder)}
-                          className="h-8.5 px-3 bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 rounded-md text-xs font-semibold transition flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs active:scale-95"
-                          title="Pesar bobina e emitir etiqueta industrial"
-                        >
-                          <Printer size={13} className="text-slate-500" />
-                          <span className="hidden sm:inline">Etiqueta</span>
-                        </button>
                       ) : activeOrder ? (
                         <button
                           type="button"

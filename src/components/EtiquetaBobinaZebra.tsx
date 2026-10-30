@@ -30,6 +30,8 @@ import {
   Barcode,
 } from "lucide-react";
 import { Order, ItemPaleteRomaneio, PaleteRomaneio } from "../types/forpack";
+import { getFullSectorDestinoName } from "../utils/formatters";
+export { getFullSectorDestinoName };
 
 export interface EtiquetaZebraData {
   tipoFilme: string;      // Ex: "FILME PEBD IMP" ou "PET+PE"
@@ -48,6 +50,9 @@ export interface EtiquetaZebraData {
   incluirIdentificacaoOp?: boolean; // Padrão true para rastreabilidade e bipagem
   codigoOp?: string;
   numeroPalete?: string;
+  operador?: string;      // Operador responsável da máquina (ex: "ALAN", "CLAUDIANO")
+  setorOrigem?: string;   // Ex: "EXTRUSÃO", "REBOBINADEIRA"
+  setorDestino?: string;  // Ex: "IMPRESSÃO", "LAMINAÇÃO", "REBOBINADEIRA", "CORTE/SOLDA"
   tipoCodigoBipagem?: "qrcode" | "barcode" | "nenhum"; // Padrão: "qrcode" para bipagem rápida
   // Campos de ajuste avançado de direção e envio para impressoras térmicas
   modoEnvioCss?: "dimensoes_puras" | "auto" | "forcar_paisagem" | "forcar_retrato" | "tamanho_invertido";
@@ -430,9 +435,15 @@ export function inferEtiquetaZebraData(
   const rawItemDesc = (order?.descricaoItem || palete?.descricaoItem || "").trim();
   const itemDescricao = rawItemDesc || "PRODUTO ACABADO";
 
-  // 3. Extração das medidas (ex: 54X0,08, 63X0,028, 69X0,028)
-  const dimMatch = itemDescricao.match(/(\d+(?:[.,]\d+)?\s*[xX*]\s*\d+(?:[.,]\d+)?)/);
-  const medidas = dimMatch ? dimMatch[1].replace(/\s+/g, "").toUpperCase() : "54X0,08";
+  // 3. Extração das medidas (ex: 54X0,08, 63X0,028, 40X0,070)
+  // Prioridade absoluta: tamanho digitado pelo operador no lote/palete
+  let medidas = "";
+  if (palete?.medidas && palete.medidas.trim()) {
+    medidas = palete.medidas.trim().toUpperCase();
+  } else {
+    const dimMatch = itemDescricao.match(/(\d+(?:[.,]\d+)?\s*[xX*]\s*\d+(?:[.,]\d+)?)/);
+    medidas = dimMatch ? dimMatch[1].replace(/\s+/g, "").toUpperCase() : "54X0,08";
+  }
 
   // 4. Identifica Tipo de Filme / Material
   const mat = (order?.material || "").trim();
@@ -499,6 +510,9 @@ export function inferEtiquetaZebraData(
     modoSaidaImpressao: (saved.modoSaidaImpressao as any) || "arquivo_html",
     codigoOp: order?.numeroOp || order?.numeroPedido || palete?.numeroOp || "",
     numeroPalete: palete?.numeroPalete || "",
+    operador: palete?.operador || undefined,
+    setorOrigem: palete?.setor || undefined,
+    setorDestino: palete?.setorDestino || ((palete?.setor || "").toUpperCase().includes("EXTRUS") ? "IMPRESSÃO" : undefined),
   };
 }
 
@@ -618,6 +632,11 @@ export function buildEtiquetasHtml(
               ${config.codigoOp ? `<span class="badge-op">OP #${config.codigoOp}</span>` : ""}
               <span class="badge-item">ITEM #${item.posicao.toString().padStart(2, "0")}</span>
             </div>
+            ${config.operador ? `
+            <div class="header-operador">
+              <span class="operador-prefix">OPER:</span>
+              <span class="operador-nome">${config.operador}</span>
+            </div>` : ""}
             <div class="header-date">
               <span>DATA: <strong>${config.dataImpressao}</strong></span>
             </div>
@@ -639,6 +658,7 @@ export function buildEtiquetasHtml(
               <div class="info-material">
                 <span class="label-prefix">FILME:</span>
                 <span class="val-material">${config.tipoFilme || "FILME"}</span>
+                ${config.setorDestino ? `<span class="badge-destino">DESTINO: ${getFullSectorDestinoName(config.setorDestino)}</span>` : ""}
               </div>
             </div>
             <div class="body-medidas-right">
@@ -659,7 +679,10 @@ export function buildEtiquetasHtml(
               <span class="peso-title">PESO LÍQUIDO:</span>
               <span class="peso-number">${hasWeights ? `${item.pesoLiquido.toFixed(1)} KG` : "________ KG"}</span>
             </div>
-            ${item.codigoBobina ? `<span class="footer-bob-id">${item.codigoBobina}</span>` : ""}
+            <div class="footer-extra-tags" style="display:flex;align-items:center;gap:3px;margin-left:auto;">
+              ${config.operador ? `<span class="footer-op-badge">OP: ${config.operador}</span>` : ""}
+              ${item.codigoBobina ? `<span class="footer-bob-id">${item.codigoBobina}</span>` : ""}
+            </div>
           </div>
         </div>
 
@@ -701,7 +724,7 @@ export function buildEtiquetasHtml(
 
       <!-- LINHA 5: DATA E LOGO FORPACK -->
       <div class="line-5-footer">
-        <span class="footer-data">DATA: ${config.dataImpressao}</span>
+        <span class="footer-data">DATA: ${config.dataImpressao}${config.operador ? ` · ${config.operador}` : ""}</span>
         <div class="footer-logo">
           <span class="footer-logo-circle">f</span>
           <span class="footer-logo-name">Forpack</span>
@@ -1119,6 +1142,44 @@ export function buildEtiquetasHtml(
       font-weight: 800;
       color: #0f172a;
     }
+    .header-operador {
+      display: inline-flex;
+      align-items: center;
+      gap: 2px;
+      font-size: 8px;
+      font-weight: 800;
+      color: #0f172a;
+      white-space: nowrap;
+      text-transform: uppercase;
+      background: #f1f5f9;
+      padding: 0.5px 3.5px;
+      border-radius: 2px;
+      border: 1px solid #cbd5e1;
+      max-width: 25mm;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      flex-shrink: 0;
+    }
+    .header-operador .operador-prefix {
+      font-size: 6.8px;
+      font-weight: 900;
+      color: #64748b;
+    }
+    .header-operador .operador-nome {
+      font-size: 8.5px;
+      font-weight: 900;
+      color: #000;
+    }
+    .footer-op-badge {
+      font-size: 7.5px;
+      font-weight: 900;
+      color: #0f172a;
+      background: #e2e8f0;
+      padding: 0.5px 3.5px;
+      border-radius: 2px;
+      letter-spacing: 0.1px;
+      white-space: nowrap;
+    }
     .header-date {
       font-size: 8.5px;
       font-weight: 800;
@@ -1171,19 +1232,36 @@ export function buildEtiquetasHtml(
       color: #000;
     }
     .info-material {
-      font-size: 11px;
+      font-size: 10.5px;
       font-weight: 900;
       letter-spacing: 0.2px;
       text-transform: uppercase;
       line-height: 1.15;
       margin-top: 1px;
-      white-space: nowrap;
+      display: flex;
+      align-items: center;
+      gap: 3px;
       overflow: hidden;
-      text-overflow: ellipsis;
     }
     .val-material {
       font-weight: 900;
       color: #000;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      min-width: 0;
+    }
+    .badge-destino {
+      font-size: 6.8px;
+      font-weight: 900;
+      background: #0f172a;
+      color: #fff;
+      padding: 0.5px 3.5px;
+      border-radius: 2px;
+      letter-spacing: 0.2px;
+      flex-shrink: 0;
+      white-space: nowrap;
+      margin-left: auto;
     }
     .info-produto {
       font-size: 11px;
@@ -1426,6 +1504,11 @@ export function generateZplCode(
       }
     }
 
+    const fullDestino = config.setorDestino ? getFullSectorDestinoName(config.setorDestino) : "";
+    const filmeZpl = fullDestino
+      ? `^A0N,17,17\n^FO${xOffset + 20},91^FB210,1,0,L^FDFILME: ${config.tipoFilme}^FS\n^A0N,15,15\n^FO${xOffset + 235},91^FB${mainWidth - 235 - 150},1,0,L^FDDESTINO: ${fullDestino}^FS`
+      : `^A0N,17,17\n^FO${xOffset + 20},91^FB${mainWidth - 165},1,0,L^FDFILME: ${config.tipoFilme}^FS`;
+
     return `^FO${xOffset + 20},14^GB22,22,22,B,0^FS
 ^A0N,18,18
 ^FR^FO${xOffset + 27},16^FDf^FS
@@ -1434,6 +1517,7 @@ export function generateZplCode(
 ${config.codigoOp ? `^A0N,18,18\n^FO${xOffset + 145},18^FDOP #${config.codigoOp}^FS` : ""}
 ^A0N,18,18
 ^FO${xOffset + (config.codigoOp ? 245 : 145)},18^FD${itemNumStr}^FS
+${config.operador ? `^A0N,15,15\n^FO${xOffset + (config.codigoOp ? 345 : 245)},19^FDOPR: ${config.operador.toUpperCase()}^FS` : ""}
 ^A0N,16,16
 ^FO${xOffset + (hasBipagem ? 350 : 500)},18^FB${hasBipagem ? 250 : 270},1,0,R^FDDATA: ${config.dataImpressao}^FS
 ^FO${xOffset + 20},42^GB${mainWidth},2,2^FS
@@ -1441,8 +1525,7 @@ ${config.codigoOp ? `^A0N,18,18\n^FO${xOffset + 145},18^FDOP #${config.codigoOp}
 ^FO${xOffset + 20},47^FB${mainWidth - 165},1,0,L^FDCLIENTE: ${clientName}^FS
 ^A0N,19,19
 ^FO${xOffset + 20},69^FB${mainWidth - 165},1,0,L^FDITEM: ${itemName}^FS
-^A0N,17,17
-^FO${xOffset + 20},91^FB${mainWidth - 165},1,0,L^FDFILME: ${config.tipoFilme}^FS
+${filmeZpl}
 ^A0N,14,14
 ^FO${xOffset + mainWidth - 150},47^FB150,1,0,R^FDMEDIDAS^FS
 ^A0N,32,32
@@ -1451,7 +1534,8 @@ ${config.codigoOp ? `^A0N,18,18\n^FO${xOffset + 145},18^FDOP #${config.codigoOp}
 ^A0N,22,22
 ^FO${xOffset + 20},125^FD${pesoBText}^FS
 ^A0N,24,24
-^FO${xOffset + 280},124^FD${pesoLText}^FS${bipZpl}`;
+^FO${xOffset + 265},124^FD${pesoLText}^FS
+${config.operador ? `^A0N,15,15\n^FO${xOffset + 465},126^FB${mainWidth - 465},1,0,R^FDOP: ${config.operador.toUpperCase()}^FS` : ""}${bipZpl}`;
   };
 
   // Gerador ZPL para etiqueta 43x24mm (2 Colunas / Foto 2)
@@ -1475,7 +1559,7 @@ ${config.codigoOp ? `^A0N,18,18\n^FO${xOffset + 145},18^FDOP #${config.codigoOp}
 ^A0N,20,20
 ^FO${xOffset + 10},100^FD${pesoText}^FS
 ^A0N,18,18
-^FO${xOffset + 10},138^FDDATA: ${config.dataImpressao}^FS
+^FO${xOffset + 10},138^FDDATA: ${config.dataImpressao}${config.operador ? ` · ${config.operador.toUpperCase()}` : ""}^FS
 ^FO${xOffset + 242},134^GB18,18,18,B,0^FS
 ^A0N,15,15
 ^FR^FO${xOffset + 248},136^FDf^FS
@@ -2414,6 +2498,11 @@ export function EtiquetaZebraModal({
                                 ITEM #{previewBobina.posicao.toString().padStart(2, "0")}
                               </span>
                             </div>
+                            {config.operador && (
+                              <div className="text-[7px] font-bold text-slate-800 bg-slate-100 px-1 py-0.2 rounded border border-slate-300 truncate max-w-[85px]" title={`Operador: ${config.operador}`}>
+                                <span className="text-[6.5px] font-extrabold text-slate-500">OPR:</span> {config.operador}
+                              </div>
+                            )}
                             <div className="text-[8px] font-bold text-slate-800 whitespace-nowrap shrink-0 ml-auto">
                               DATA: {config.dataImpressao}
                             </div>
@@ -2430,9 +2519,14 @@ export function EtiquetaZebraModal({
                                 <span className="text-[7.5px] font-bold text-slate-500 shrink-0">ITEM:</span>
                                 <span className="truncate">{config.aplicacao || config.itemDescricao || "PRODUTO"}</span>
                               </div>
-                              <div className="font-bold text-[8px] tracking-wide uppercase leading-tight truncate text-slate-700 mt-0.5 flex items-center gap-1">
+                              <div className="font-bold text-[8px] tracking-wide uppercase leading-tight text-slate-700 mt-0.5 flex items-center gap-1 overflow-hidden">
                                 <span className="text-[7px] font-bold text-slate-500 shrink-0">FILME:</span>
-                                <span className="truncate">{config.tipoFilme || "FILME PEBD IMP"}</span>
+                                <span className="truncate min-w-0">{config.tipoFilme || "FILME PEBD IMP"}</span>
+                                {config.setorDestino && (
+                                  <span className="text-[6.5px] font-black uppercase tracking-wider bg-slate-900 text-white px-1 py-0.5 rounded-2xs shrink-0 whitespace-nowrap ml-auto">
+                                    DESTINO: {getFullSectorDestinoName(config.setorDestino)}
+                                  </span>
+                                )}
                               </div>
                             </div>
                             <div className="border-l border-slate-300 pl-1.5 text-right shrink-0">
@@ -2463,6 +2557,11 @@ export function EtiquetaZebraModal({
                                   : "________ KG"}
                               </span>
                             </div>
+                            {config.operador && (
+                              <span className="text-[6.5px] font-bold text-slate-700 bg-slate-100 px-1 py-0.2 rounded border border-slate-200 truncate max-w-[70px]">
+                                OP: {config.operador}
+                              </span>
+                            )}
                           </div>
                         </div>
 
@@ -3011,7 +3110,54 @@ export function EtiquetaZebraModal({
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1 border-t border-slate-200">
+                  {/* SETOR DE DESTINO (EXTRUSÃO -> PRÓXIMA ETAPA) */}
+                  <div className="pt-1 border-t border-slate-200">
+                    <label className="block text-[10px] font-semibold text-slate-700 mb-1 flex items-center justify-between">
+                      <span>Setor de Destino (Próxima Etapa da Bobina)</span>
+                      {config.setorDestino ? (
+                        <span className="text-[9px] font-bold text-blue-600">
+                          Ativo: {getFullSectorDestinoName(config.setorDestino)}
+                        </span>
+                      ) : (
+                        <span className="text-[9px] text-slate-400">Sem destino específico</span>
+                      )}
+                    </label>
+                    <div className="grid grid-cols-5 gap-1">
+                      {["IMPRESSÃO", "LAMINAÇÃO", "REBOBINADEIRA", "CORTE / SOLDA", "NENHUM"].map((dest) => {
+                        const isSelected = dest === "NENHUM"
+                          ? !config.setorDestino
+                          : getFullSectorDestinoName(config.setorDestino) === getFullSectorDestinoName(dest);
+                        return (
+                          <button
+                            key={dest}
+                            type="button"
+                            onClick={() => updateConfig({ setorDestino: dest === "NENHUM" ? undefined : getFullSectorDestinoName(dest) })}
+                            className={`py-1 px-1 rounded text-[9.5px] font-bold border transition cursor-pointer text-center truncate ${
+                              isSelected
+                                ? "bg-slate-900 text-white border-slate-950 shadow-2xs"
+                                : "bg-white text-slate-700 border-slate-300 hover:bg-slate-100"
+                            }`}
+                          >
+                            {dest === "CORTE / SOLDA" ? "CORTE/SOLDA" : dest}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1 border-t border-slate-200">
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-700 mb-0.5">
+                        Operador Responsável
+                      </label>
+                      <input
+                        type="text"
+                        value={config.operador || ""}
+                        onChange={(e) => updateConfig({ operador: e.target.value.toUpperCase() })}
+                        placeholder="Nome do operador"
+                        className="w-full px-2 py-1.5 bg-white border border-slate-300 rounded text-xs font-bold text-slate-900 uppercase placeholder:normal-case placeholder:font-normal"
+                      />
+                    </div>
                     <div>
                       <label className="block text-[10px] font-semibold text-slate-700 mb-0.5">
                         Data de Emissão
