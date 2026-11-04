@@ -1009,6 +1009,97 @@ export async function updateStatusBobinaWIP(
   }
 }
 
+export interface ConsumoBobinaWipParams {
+  bobinaId: string;
+  pesoConsumidoKg: number;
+  baixaTotal: boolean;
+  opId?: string;
+  setor?: string;
+  maquinaNome?: string;
+  operador?: string;
+}
+
+/**
+ * Registra o consumo de uma bobina semiacabada (WIP) no apontamento de produção.
+ * Deduz o peso consumido. Se baixaTotal for true ou o saldo for zerado, marca como CONSUMIDA.
+ * Caso contrário, mantém como DISPONIVEL no pátio com o saldo residual atualizado.
+ * Gera automaticamente o registro no livro de movimentações de estoque.
+ */
+export async function consumirBobinaWip(
+  params: ConsumoBobinaWipParams
+): Promise<BobinaSemiAcabada | null> {
+  try {
+    const getRes = await fetch(
+      `${SUPABASE_URL}/rest/v1/estoque_semiacabados?id=eq.${encodeURIComponent(params.bobinaId)}&select=*`,
+      {
+        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
+        cache: "no-store",
+      }
+    );
+    if (!getRes.ok) {
+      throw new Error("Bobina não encontrada no estoque semiacabado.");
+    }
+    const rows = (await getRes.json()) as BobinaSemiAcabada[];
+    if (!rows || rows.length === 0) {
+      throw new Error("Bobina não encontrada no estoque.");
+    }
+    const bobina = rows[0];
+    const pesoAtual = Number(bobina.peso_liquido_kg) || 0;
+    const pesoGasto = Math.min(pesoAtual, Math.max(0, params.pesoConsumidoKg));
+    const novoSaldo = Math.max(0, pesoAtual - pesoGasto);
+    const deveFinalizar = params.baixaTotal || novoSaldo <= 0.1;
+
+    const updateBody: any = {
+      peso_liquido_kg: deveFinalizar ? 0 : Number(novoSaldo.toFixed(2)),
+      status: deveFinalizar ? "CONSUMIDA" : "DISPONIVEL",
+      updated_at: new Date().toISOString(),
+    };
+
+    const patchRes = await fetch(
+      `${SUPABASE_URL}/rest/v1/estoque_semiacabados?id=eq.${encodeURIComponent(params.bobinaId)}&select=*`,
+      {
+        method: "PATCH",
+        headers: {
+          apikey: SUPABASE_KEY,
+          Authorization: `Bearer ${SUPABASE_KEY}`,
+          "Content-Type": "application/json",
+          Prefer: "return=representation",
+        },
+        body: JSON.stringify(updateBody),
+      }
+    );
+
+    if (!patchRes.ok) {
+      const errTxt = await patchRes.text();
+      throw new Error(`Erro ao atualizar saldo da bobina: ${errTxt}`);
+    }
+
+    const updatedRows = (await patchRes.json()) as BobinaSemiAcabada[];
+
+    // Registra movimentação de consumo no livro de movimentações
+    try {
+      await saveMovimentacaoEstoque({
+        tipo_movimento: "CONSUMO_PRODUCAO",
+        tipo_item: "SEMIACABADO",
+        op_id: params.opId || bobina.op_id,
+        setor: params.setor || bobina.setor_destino,
+        quantidade: pesoGasto,
+        documento_referencia: bobina.numero_bobina,
+        observacao: deveFinalizar
+          ? `Consumo integral (${pesoGasto.toFixed(1)} kg) da bobina ${bobina.numero_bobina} na máquina ${params.maquinaNome || ""} (Op: ${params.operador || ""})`
+          : `Consumo parcial (${pesoGasto.toFixed(1)} kg) da bobina ${bobina.numero_bobina}. Saldo residual de ${novoSaldo.toFixed(1)} kg no pátio.`,
+      });
+    } catch (movErr) {
+      console.warn("Aviso ao registrar movimentação de consumo:", movErr);
+    }
+
+    return updatedRows[0] || null;
+  } catch (err) {
+    console.error("Erro em consumirBobinaWip:", err);
+    throw err;
+  }
+}
+
 export async function deleteBobinaWIP(id: string): Promise<void> {
   const response = await fetch(
     `${SUPABASE_URL}/rest/v1/estoque_semiacabados?id=eq.${encodeURIComponent(id)}`,
