@@ -91,6 +91,7 @@ export type Production = {
   cliente?: string;
   descricaoItem?: string;
   material?: string;
+  qtdUnidades?: string;       // Qtd produzida em unidades (Setor de Corte e Solda)
   bobinasWipConsumidas?: string[];
   bobinaWipOrigem?: string;
   _key?: string;
@@ -248,11 +249,12 @@ export type StatusPalete = "ABERTO" | "FECHADO" | "CANCELADO";
 export type ItemPaleteRomaneio = {
   posicao: number;          // 1..80
   pesoBruto: number;        // ex: 49.3
-  tara: number;             // ex: 1.6
+  tara: number;             // ex: 1.6 (ou 0 em corte/solda)
   pesoLiquido: number;      // ex: 47.7
-  codigoBobina?: string;    // ex: BOB-01
+  codigoBobina?: string;    // ex: BOB-01 ou VOL-01
   horario?: string;
   wipId?: string;           // ID do saldo intermediário em estoque_semiacabados (WIP)
+  quantidadeUnidades?: number; // Qtd em unidades/peças/sacos (Setor de Corte e Solda)
 };
 
 export type PaleteRomaneio = {
@@ -265,19 +267,20 @@ export type PaleteRomaneio = {
   descricaoItem: string;
   maquinaId: string;
   maquinaNome?: string;
-  setor: Sector | string;    // ex: "REBOBINADEIRA" ou "EXTRUSÃO"
+  setor: Sector | string;    // ex: "REBOBINADEIRA" ou "EXTRUSÃO" ou "CORTE"
   setorDestino?: string;     // ex: "IMPRESSÃO", "LAMINAÇÃO", "REBOBINADEIRA", "CORTE/SOLDA"
   medidas?: string;          // ex: "40X0,070" tamanho digitado pelo operador na Extrusão
   data: string;              // YYYY-MM-DD
   turno: string;             // "1º Turno (06h - 14h)", etc.
   operador: string;
   auxiliar?: string;
-  taraPadraoTubete: number;  // ex: 1.6 kg
+  taraPadraoTubete: number;  // ex: 1.6 kg (0 em corte/solda)
   itens: ItemPaleteRomaneio[];
-  totalVolumes: number;      // contagem de bobinas
+  totalVolumes: number;      // contagem de bobinas/volumes
   pesoBrutoTotal: number;    // soma bruto kg
   taraTotal: number;         // soma tara kg
   pesoLiquidoTotal: number;  // soma líquido kg
+  totalUnidades?: number;    // soma de unidades (Setor de Corte e Solda)
   status: StatusPalete;
   observacoes?: string;
   bobinaMaeOrigem?: string;
