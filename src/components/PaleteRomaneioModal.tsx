@@ -24,6 +24,8 @@ import {
   Activity,
   Filter,
   FileDown,
+  Barcode,
+  QrCode,
 } from "lucide-react";
 import {
   Order,
@@ -35,6 +37,7 @@ import {
   Totals,
   SECTORS,
   Sector,
+  BobinaSemiAcabada,
 } from "../types/forpack";
 import {
   isOrderInProduction,
@@ -49,6 +52,8 @@ import {
   saveBobinaWIP,
   deleteBobinaWIP,
   syncPaletesExtrusaoToWip,
+  loadBobinasWIP,
+  consumirBobinaWip,
 } from "../services/supabaseApi";
 import {
   EtiquetaZebraModal,
@@ -153,6 +158,89 @@ export function extractMedidasFromOrder(order?: Order | null): string {
     return match[1].replace(/\s+/g, "").toUpperCase();
   }
   return "";
+}
+
+// Verifica se uma bobina WIP pertence à OP/Pedido selecionado de forma robusta e precisa
+export function isBobinaMatchOrder(
+  b: BobinaSemiAcabada,
+  order?: Order | null,
+  numeroPalete?: string | null
+): boolean {
+  if (!b || !order) return false;
+
+  const clean = (val?: string | null) =>
+    String(val || "")
+      .replace(/^(OP|PED)\s*#?/i, "")
+      .replace(/[^a-zA-Z0-9]/g, "")
+      .trim()
+      .toLowerCase();
+
+  const bOp = clean(b.op_id);
+  const bNum = String(b.numero_bobina || "").toUpperCase();
+
+  // 1. Identificadores diretos da ordem (id, numeroOp, numeroPedido)
+  const oId = clean(order.id);
+  const oOp = clean(order.numeroOp);
+  const oPed = clean(order.numeroPedido);
+
+  // Match exato ou substring direto por ID da OP / Pedido
+  if (bOp && ((oId && bOp === oId) || (oOp && bOp === oOp) || (oPed && bOp === oPed))) return true;
+  if (oId && bOp && (bOp.includes(oId) || oId.includes(bOp))) return true;
+  if (oOp && bOp && (bOp.includes(oOp) || oOp.includes(bOp))) return true;
+  if (oPed && bOp && (bOp.includes(oPed) || oPed.includes(bOp))) return true;
+
+  // 2. Extrair números da OP com 3 ou mais dígitos (ex: "9820", "9420", "9819", "9296")
+  // Evita falsos positivos com sequenciais de 2 dígitos como '14' ou '01'
+  const extractOpNumbers = (str?: string | null): string[] => {
+    if (!str) return [];
+    const matches = String(str).match(/\d{3,}/g);
+    return matches || [];
+  };
+
+  const opNumbers = [
+    ...extractOpNumbers(order.numeroOp),
+    ...extractOpNumbers(order.numeroPedido),
+  ];
+
+  for (const num of opNumbers) {
+    if (bNum.includes(num)) return true;
+    if (bOp.includes(num)) return true;
+  }
+
+  // 3. Match por código da OP no prefixo da bobina (ex: PAL-9820- ou PAL-OP-51-)
+  if (order.numeroOp && order.numeroOp.trim().length >= 2) {
+    const rawOp = order.numeroOp.trim().toUpperCase();
+    if (bNum.includes(`PAL-${rawOp}-`) || bNum.includes(`-${rawOp}-`)) return true;
+  }
+  if (order.numeroPedido && order.numeroPedido.trim().length >= 2) {
+    const rawPed = order.numeroPedido.trim().toUpperCase();
+    if (bNum.includes(`PAL-${rawPed}-`) || bNum.includes(`-${rawPed}-`)) return true;
+  }
+
+  return false;
+}
+
+// Verifica se o setor de destino da bobina é compatível com o setor da máquina selecionada
+export function doesBobinaMatchSector(
+  bobinaDestino?: string | null,
+  machineSector?: string | null
+): boolean {
+  const s = String(machineSector || "").toUpperCase().trim();
+  const d = String(bobinaDestino || "").toUpperCase().trim();
+  if (!s) return true;
+  if (s.includes("REBOBIN")) {
+    return d.includes("REBOBIN") || d.includes("REBOB");
+  }
+  if (s.includes("IMPRESS")) {
+    return d.includes("IMPRESS");
+  }
+  if (s.includes("LAMIN")) {
+    return d.includes("LAMIN");
+  }
+  if (s.includes("CORTE") || s.includes("SOLDA")) {
+    return d.includes("CORTE") || d.includes("SOLDA");
+  }
+  return d === s;
 }
 
 export function PaleteRomaneioModal({
@@ -362,9 +450,140 @@ export function PaleteRomaneioModal({
     return getOrderSectorBreakdown(selectedOrder, records, machines, totals);
   }, [selectedOrder, records, machines, totals]);
 
+  // Bobinas Mãe / Semiacabadas (WIP) disponíveis da OP para uso na Rebobinadeira/Acabamento
+  const [wipBobinas, setWipBobinas] = useState<BobinaSemiAcabada[]>([]);
+  const [selectedMotherBobinaId, setSelectedMotherBobinaId] = useState<string | null>(null);
+  const [wipScanQuery, setWipScanQuery] = useState("");
+  const [wipLoading, setWipLoading] = useState(false);
+  const [wipBaixaTotal, setWipBaixaTotal] = useState(false);
+  const [wipScope, setWipScope] = useState<"op" | "setor" | "todos">("op");
+
+  const loadMotherBobinas = async () => {
+    if (!isOpen) return;
+    setWipLoading(true);
+    try {
+      const list = await loadBobinasWIP();
+      setWipBobinas(list);
+    } catch (e) {
+      console.warn("Aviso ao carregar bobinas mãe WIP:", e);
+    } finally {
+      setWipLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (isOpen) {
+      loadMotherBobinas();
+    }
+  }, [isOpen, selectedOrder?.id]);
+
+  // Bobinas WIP filtradas por escopo e busca
+  const { opBobinas, setorBobinas, allActiveBobinas, availableMotherBobinas } = useMemo(() => {
+    const activeList = wipBobinas.filter(
+      (b) => (b.status === "DISPONIVEL" || b.status === "EM_USO") && Number(b.peso_liquido_kg) > 0
+    );
+    const currentSector = (selectedMachine?.setor || machine?.setor || "").toUpperCase().trim();
+
+    // 1. Bobinas vinculadas à OP ativa E com destino para o setor atual da máquina
+    // (Regra: No setor da máquina (ex: Rebobinadeira) da OP (ex: 9820), lista apenas as bobinas daquela OP com destino ao setor selecionado)
+    const opSectorList = activeList.filter(
+      (b) => isBobinaMatchOrder(b, selectedOrder, numeroPalete) && doesBobinaMatchSector(b.setor_destino, currentSector)
+    );
+
+    // 2. Bobinas com destino para o setor atual da máquina (de qualquer OP)
+    const setorList = activeList.filter((b) => doesBobinaMatchSector(b.setor_destino, currentSector));
+
+    let base: BobinaSemiAcabada[];
+    if (wipScope === "op") {
+      base = opSectorList;
+    } else if (wipScope === "setor") {
+      base = setorList;
+    } else {
+      base = activeList;
+    }
+
+    // Se houver busca por texto digitado / QR code bipado
+    if (wipScanQuery.trim()) {
+      const q = wipScanQuery.trim().toUpperCase();
+      const filtered = base.filter(
+        (b) =>
+          b.numero_bobina.toUpperCase().includes(q) ||
+          (b.op_id && b.op_id.toUpperCase().includes(q)) ||
+          (b.operador && b.operador.toUpperCase().includes(q))
+      );
+      if (filtered.length === 0) {
+        // Se não encontrou no escopo selecionado, permite bipar/buscar em todo o pátio ativo
+        const anyMatch = activeList.filter(
+          (b) =>
+            b.numero_bobina.toUpperCase().includes(q) ||
+            (b.op_id && b.op_id.toUpperCase().includes(q))
+        );
+        return {
+          opBobinas: opSectorList,
+          setorBobinas: setorList,
+          allActiveBobinas: activeList,
+          availableMotherBobinas: anyMatch,
+        };
+      }
+      return {
+        opBobinas: opSectorList,
+        setorBobinas: setorList,
+        allActiveBobinas: activeList,
+        availableMotherBobinas: filtered,
+      };
+    }
+
+    return {
+      opBobinas: opSectorList,
+      setorBobinas: setorList,
+      allActiveBobinas: activeList,
+      availableMotherBobinas: base,
+    };
+  }, [wipBobinas, selectedOrder, numeroPalete, selectedMachine, machine, wipScope, wipScanQuery]);
+
+  // Bobina mãe ativa marcada em uso
+  const activeMotherBobina = useMemo(() => {
+    if (!selectedMotherBobinaId) return null;
+    return wipBobinas.find(b => b.id === selectedMotherBobinaId) || null;
+  }, [selectedMotherBobinaId, wipBobinas]);
+
+  // Função para identificar bobina via bipagem de QR Code ou busca
+  const handleScanMotherBobina = (query: string) => {
+    const q = query.trim().toUpperCase();
+    if (!q) return;
+
+    // 1. Tentar nas bobinas do escopo atual
+    let match = availableMotherBobinas.find(b =>
+      b.numero_bobina.toUpperCase() === q ||
+      q.includes(b.numero_bobina.toUpperCase()) ||
+      b.numero_bobina.toUpperCase().includes(q)
+    );
+
+    // 2. Tentar em todo o pátio ativo
+    if (!match) {
+      match = allActiveBobinas.find(b =>
+        b.numero_bobina.toUpperCase() === q ||
+        q.includes(b.numero_bobina.toUpperCase()) ||
+        b.numero_bobina.toUpperCase().includes(q)
+      );
+    }
+
+    if (match) {
+      setSelectedMotherBobinaId(match.id);
+      setWipScanQuery("");
+      setSuccessToast(`Bobina mãe ${match.numero_bobina} (${match.peso_liquido_kg} kg) identificada e vinculada!`);
+      setTimeout(() => setSuccessToast(""), 3500);
+    } else {
+      setErrorMsg(`Bobina "${query}" não encontrada ou sem saldo disponível no pátio.`);
+      setTimeout(() => setErrorMsg(""), 3500);
+    }
+  };
 
   const handleSelectOrder = (order: Order) => {
     setSelectedOrder(order);
+    setSelectedMotherBobinaId(null);
+    setWipScanQuery("");
+    setWipBaixaTotal(false);
     setIsOpSearchOpen(false);
     setOpSearchQuery("");
     if (!medidasBobina || medidasBobina === extractMedidasFromOrder(selectedOrder)) {
@@ -549,6 +768,7 @@ export function PaleteRomaneioModal({
       taraTotal: Math.round(calcTara * 100) / 100,
       pesoLiquidoTotal: Math.round(calcLiquido * 100) / 100,
       status: statusToUse,
+      bobinaMaeOrigem: activeMotherBobina?.numero_bobina || initialPalete?.bobinaMaeOrigem,
       observacoes: observacoes.trim() || undefined,
       idApontamentoProducao: initialPalete?.idApontamentoProducao,
       created_at: initialPalete?.created_at || new Date().toISOString(),
@@ -848,6 +1068,28 @@ export function PaleteRomaneioModal({
     try {
       const paleteFechado = buildPaleteObject(itens, "FECHADO");
       await onClosePaleteAndRegister(paleteFechado, selectedOrder, machToUse);
+
+      // Consome o saldo da bobina mãe semiacabada utilizada se houver
+      if (activeMotherBobina) {
+        const pesoConsumido = itens.reduce((sum, item) => sum + (Number(item.pesoLiquido) || 0), 0);
+        const pesoOriginal = Number(activeMotherBobina.peso_liquido_kg) || 0;
+        const saldoRestante = Math.max(0, pesoOriginal - pesoConsumido);
+        const deveFinalizar = wipBaixaTotal || saldoRestante <= 0.1;
+
+        try {
+          await consumirBobinaWip({
+            bobinaId: activeMotherBobina.id,
+            pesoConsumidoKg: pesoConsumido > 0 ? pesoConsumido : pesoOriginal,
+            baixaTotal: deveFinalizar,
+            opId: selectedOrder.numeroOp || selectedOrder.id,
+            setor: machToUse.setor,
+            maquinaNome: machToUse.name,
+            operador: operador.trim() || "Operador",
+          });
+        } catch (consErr) {
+          console.warn("Aviso ao consumir bobina mãe no fechamento do palete:", consErr);
+        }
+      }
 
       if (isExtrusao) {
         try {
@@ -1630,6 +1872,284 @@ export function PaleteRomaneioModal({
                   </button>
                 </div>
               </div>
+
+              {/* SEÇÃO DE BOBINAS MÃE / ENTRADA SEMIACABADAS (WIP): Apenas para setores seguintes à extrusão (Impressão, Laminação, Rebobinadeira, Corte) */}
+              {!isExtrusao && (
+                <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 space-y-3.5">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <div className="w-7 h-7 rounded-lg bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600">
+                        <Layers className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <h4 className="text-xs font-black uppercase tracking-wider text-slate-800 flex items-center gap-1.5">
+                          Bobinas Mãe / Semiacabadas (WIP)
+                          <span className="text-[10px] font-bold bg-indigo-100 text-indigo-700 px-1.5 py-0.2 rounded font-mono">
+                            {availableMotherBobinas.length} disp.
+                          </span>
+                        </h4>
+                        <p className="text-[11px] text-slate-500">
+                          Marque a bobina que está alimentando a máquina para abater o saldo.
+                        </p>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={loadMotherBobinas}
+                      disabled={wipLoading}
+                      className="text-[11px] text-indigo-600 hover:text-indigo-800 font-medium flex items-center gap-1 cursor-pointer"
+                      title="Recarregar saldo de bobinas do pátio"
+                    >
+                      <RotateCcw className={`w-3 h-3 ${wipLoading ? "animate-spin" : ""}`} />
+                      <span>Atualizar</span>
+                    </button>
+                  </div>
+
+                  {/* 1. BARRA DE BUSCA / BIPAGEM DE QR CODE */}
+                  <div className="flex gap-2">
+                    <div className="relative flex-1">
+                      <Barcode className="absolute left-3 top-2.5 w-4 h-4 text-slate-400" />
+                      <input
+                        type="text"
+                        value={wipScanQuery}
+                        onChange={(e) => setWipScanQuery(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            handleScanMotherBobina(wipScanQuery);
+                          }
+                        }}
+                        placeholder="Bipar QR Code da etiqueta ou digitar código (ex: PAL-01-BOB-01)..."
+                        className="w-full pl-9 pr-3 py-2 text-xs bg-slate-50 hover:bg-white focus:bg-white border border-slate-300 rounded-xl font-mono uppercase focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleScanMotherBobina(wipScanQuery)}
+                      className="px-4 py-2 bg-slate-900 hover:bg-slate-800 active:scale-95 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shrink-0 transition shadow-sm cursor-pointer"
+                    >
+                      <QrCode className="w-3.5 h-3.5" />
+                      <span>Bipar / Buscar</span>
+                    </button>
+                  </div>
+
+                  {/* 2. CARD DA BOBINA MÃE ATIVA SELECIONADA EM USO */}
+                  {activeMotherBobina && (() => {
+                    const pesoOriginal = Number(activeMotherBobina.peso_liquido_kg) || 0;
+                    const pesoConsumido = pesoLiquidoTotal;
+                    const saldoRestante = Math.max(0, pesoOriginal - pesoConsumido);
+
+                    return (
+                      <div className="bg-gradient-to-r from-indigo-50 to-blue-50 border-2 border-indigo-500/80 rounded-xl p-3 space-y-2.5 shadow-xs">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
+                            <span className="text-xs font-black text-indigo-950 font-mono tracking-wide">
+                              BOBINA EM USO: {activeMotherBobina.numero_bobina}
+                            </span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setSelectedMotherBobinaId(null)}
+                            className="text-[11px] text-red-600 hover:text-red-800 font-bold underline cursor-pointer"
+                          >
+                            Desmarcar / Trocar
+                          </button>
+                        </div>
+
+                        {/* Grid de balanço em tempo real */}
+                        <div className="grid grid-cols-3 gap-2 bg-white/90 p-2 rounded-lg border border-indigo-100 text-center font-mono">
+                          <div>
+                            <span className="text-[10px] text-slate-500 uppercase block font-sans">Saldo Entrada</span>
+                            <strong className="text-xs text-slate-800">{pesoOriginal.toFixed(1)} kg</strong>
+                          </div>
+                          <div>
+                            <span className="text-[10px] text-indigo-600 uppercase block font-sans">Apontado Palete</span>
+                            <strong className="text-xs text-indigo-900">{pesoConsumido.toFixed(1)} kg</strong>
+                          </div>
+                          <div>
+                            <span className="text-[10px] text-slate-500 uppercase block font-sans">Saldo Restante</span>
+                            <strong className={`text-xs ${saldoRestante > 0 ? "text-emerald-700" : "text-slate-400"}`}>
+                              {saldoRestante.toFixed(1)} kg
+                            </strong>
+                          </div>
+                        </div>
+
+                        {/* Opção de baixa total ou devolução do residual */}
+                        <div className="flex items-center justify-between text-[11px] pt-0.5">
+                          <label className="flex items-center gap-2 cursor-pointer font-medium text-slate-700 select-none">
+                            <input
+                              type="checkbox"
+                              checked={wipBaixaTotal || saldoRestante <= 0.1}
+                              disabled={saldoRestante <= 0.1}
+                              onChange={(e) => setWipBaixaTotal(e.target.checked)}
+                              className="w-4 h-4 text-indigo-600 rounded accent-indigo-600"
+                            />
+                            <span>Baixa total (bobina mãe 100% finalizada)</span>
+                          </label>
+                          {!wipBaixaTotal && saldoRestante > 0.1 && (
+                            <span className="text-emerald-700 font-bold">
+                              ✓ Saldo residual de {saldoRestante.toFixed(1)} kg voltará ao pátio
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  {/* 3. LISTA DE BOBINAS DISPONÍVEIS COM ABAS DE ESCOPO (DESTA OP, SETOR, TODO O PÁTIO) */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between flex-wrap gap-2 pt-0.5">
+                      <span className="text-xs text-slate-700 font-bold block">
+                        Lista de Bobinas Disponíveis ({availableMotherBobinas.length}):
+                      </span>
+
+                      {/* ABAS DE ESCOPO / FILTRO RÁPIDO */}
+                      <div className="flex items-center gap-1 bg-slate-100 p-0.5 rounded-lg border border-slate-200">
+                        <button
+                          type="button"
+                          onClick={() => setWipScope("op")}
+                          className={`px-2 py-0.5 rounded text-[11px] font-bold transition flex items-center gap-1 cursor-pointer ${
+                            wipScope === "op"
+                              ? "bg-indigo-600 text-white shadow-2xs"
+                              : "text-slate-600 hover:text-slate-900"
+                          }`}
+                          title={`Bobinas fabricadas para a OP #${selectedOrder?.numeroOp || selectedOrder?.numeroPedido || ""} com destino para ${selectedMachine?.setor || "este setor"}`}
+                        >
+                          <span>Desta OP</span>
+                          <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
+                            wipScope === "op" ? "bg-white/25 text-white" : "bg-white text-slate-700"
+                          }`}>
+                            {opBobinas.length}
+                          </span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setWipScope("setor")}
+                          className={`px-2 py-0.5 rounded text-[11px] font-bold transition flex items-center gap-1 cursor-pointer ${
+                            wipScope === "setor"
+                              ? "bg-indigo-600 text-white shadow-2xs"
+                              : "text-slate-600 hover:text-slate-900"
+                          }`}
+                          title={`Todas as bobinas no pátio com destino para ${selectedMachine?.setor || "Rebobinadeira"}`}
+                        >
+                          <span>P/ {selectedMachine?.setor || "Rebobinadeira"}</span>
+                          <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
+                            wipScope === "setor" ? "bg-white/25 text-white" : "bg-white text-slate-700"
+                          }`}>
+                            {setorBobinas.length}
+                          </span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setWipScope("todos")}
+                          className={`px-2 py-0.5 rounded text-[11px] font-bold transition flex items-center gap-1 cursor-pointer ${
+                            wipScope === "todos"
+                              ? "bg-indigo-600 text-white shadow-2xs"
+                              : "text-slate-600 hover:text-slate-900"
+                          }`}
+                          title="Todas as bobinas com saldo livre no pátio da fábrica"
+                        >
+                          <span>Todo o Pátio</span>
+                          <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
+                            wipScope === "todos" ? "bg-white/25 text-white" : "bg-white text-slate-700"
+                          }`}>
+                            {allActiveBobinas.length}
+                          </span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {availableMotherBobinas.length === 0 ? (
+                      <div className="p-4 bg-slate-50 rounded-xl border border-dashed border-slate-200 text-center text-xs text-slate-500">
+                        <Package className="w-6 h-6 text-slate-300 mx-auto mb-1.5" />
+                        <p className="font-semibold text-slate-700">
+                          {wipScope === "op"
+                            ? `Nenhuma bobina da OP #${selectedOrder?.numeroOp || selectedOrder?.numeroPedido || "selecionada"} com destino para ${selectedMachine?.setor || "este setor"} encontrada no pátio`
+                            : "Nenhuma bobina encontrada no filtro selecionado"}
+                        </p>
+                        <p className="text-[11px] text-slate-400 mt-0.5">
+                          Alterne para as abas <strong>"P/ {selectedMachine?.setor || "Rebobinadeira"}"</strong> ou <strong>"Todo o Pátio"</strong> ou bipe o código da bobina no campo acima.
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                        {availableMotherBobinas.map((b) => {
+                          const isSelected = selectedMotherBobinaId === b.id;
+                          return (
+                            <div
+                              key={b.id}
+                              onClick={() => {
+                                setSelectedMotherBobinaId(isSelected ? null : b.id);
+                                if (!isSelected) {
+                                  setSuccessToast(`Bobina mãe ${b.numero_bobina} selecionada para uso.`);
+                                  setTimeout(() => setSuccessToast(""), 3000);
+                                }
+                              }}
+                              className={`p-2.5 rounded-xl border transition-all cursor-pointer flex items-center justify-between ${
+                                isSelected
+                                  ? "bg-indigo-50 border-indigo-500 ring-2 ring-indigo-300 shadow-xs"
+                                  : "bg-white border-slate-200 hover:border-indigo-300 hover:bg-slate-50/70"
+                              }`}
+                            >
+                              <div className="flex items-center gap-3">
+                                <input
+                                  type="radio"
+                                  checked={isSelected}
+                                  onChange={() => {}}
+                                  className="w-4 h-4 text-indigo-600 accent-indigo-600 cursor-pointer pointer-events-none"
+                                />
+                                <div>
+                                  <div className="font-mono font-bold text-xs text-slate-900 flex items-center gap-1.5 flex-wrap">
+                                    <span>{b.numero_bobina}</span>
+                                    {isSelected && (
+                                      <span className="text-[9px] bg-indigo-600 text-white px-1.5 py-0.2 rounded font-sans uppercase font-bold">
+                                        EM USO
+                                      </span>
+                                    )}
+                                    {b.setor_destino && (
+                                      <span className="text-[9px] bg-slate-100 text-slate-700 border border-slate-200 px-1 py-0.2 rounded font-sans">
+                                        Destino: {b.setor_destino}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="text-[11px] text-slate-500 flex items-center gap-2 mt-0.5 font-sans flex-wrap">
+                                    <span>Origem: <strong>{b.setor_origem}</strong></span>
+                                    {b.op_id && (
+                                      <>
+                                        <span>·</span>
+                                        <span>OP: <strong className="font-mono text-slate-700">{b.op_id.replace(/^PED-/i, "")}</strong></span>
+                                      </>
+                                    )}
+                                    {b.largura_mm && (
+                                      <>
+                                        <span>·</span>
+                                        <span>{b.largura_mm}mm {b.espessura_micras ? `x ${b.espessura_micras}µm` : ""}</span>
+                                      </>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div className="text-right shrink-0 pl-2">
+                                <div className="text-sm font-black text-slate-800 font-mono">
+                                  {Number(b.peso_liquido_kg).toFixed(1)} <span className="text-[10px] font-normal text-slate-500 font-sans">kg</span>
+                                </div>
+                                <span className={`text-[10px] font-bold ${isSelected ? "text-indigo-700" : "text-slate-400"}`}>
+                                  {isSelected ? "Selecionada" : "Clique para usar"}
+                                </span>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* COLUNA DIREITA (TOTAIS, GRADE DE BOBINAS & OBSERVAÇÕES): lg:col-span-7 */}

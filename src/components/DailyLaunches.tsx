@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef } from "react";
+import React, { useState, useMemo, useRef, useEffect } from "react";
 import { Production, Order, Machine, BobinaSemiAcabada, Sector, PaleteRomaneio, ItemPaleteRomaneio, Totals, SECTORS } from "../types/forpack";
 import {
   date,
@@ -17,8 +17,9 @@ import {
   saveBobinaWIP,
   saveMovimentacaoEstoque,
   loadBobinasWIP,
+  consumirBobinaWip,
 } from "../services/supabaseApi";
-import { PaleteRomaneioModal, printOfficialRomaneio } from "./PaleteRomaneioModal";
+import { PaleteRomaneioModal, printOfficialRomaneio, isBobinaMatchOrder, doesBobinaMatchSector } from "./PaleteRomaneioModal";
 import { PaletesListView } from "./PaletesListView";
 import {
   FileText,
@@ -44,6 +45,7 @@ import {
   History,
   Sparkles,
   QrCode,
+  Barcode,
   Package,
   Calendar,
   ChevronRight,
@@ -348,6 +350,29 @@ export function DailyLaunches({
     bobina: Partial<BobinaSemiAcabada>;
     op: Order | null;
   } | null>(null);
+
+  // Estado para Bobinas Semiacabadas (WIP) e Consumo no Apontamento
+  const [wipBobinas, setWipBobinas] = useState<BobinaSemiAcabada[]>([]);
+  const [selectedWipBobina, setSelectedWipBobina] = useState<BobinaSemiAcabada | null>(null);
+  const [wipScanInput, setWipScanInput] = useState("");
+  const [wipBaixaTotal, setWipBaixaTotal] = useState(false);
+  const [wipLoading, setWipLoading] = useState(false);
+
+  const loadWipBobinasList = async () => {
+    setWipLoading(true);
+    try {
+      const list = await loadBobinasWIP();
+      setWipBobinas(list);
+    } catch (e) {
+      console.warn("Aviso ao carregar bobinas WIP no painel:", e);
+    } finally {
+      setWipLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadWipBobinasList();
+  }, []);
 
   const notify = (msg: string) => {
     setToastMessage(msg);
@@ -696,6 +721,10 @@ export function DailyLaunches({
 
     setOpSearchQuery("");
     setShowAllFactoryOps(false);
+    setSelectedWipBobina(null);
+    setWipScanInput("");
+    setWipBaixaTotal(false);
+    loadWipBobinasList();
     setActiveModal({ machine, order });
   };
 
@@ -770,6 +799,10 @@ export function DailyLaunches({
       if (matchMicras) parsedEspessura = matchMicras[1];
     }
 
+    setSelectedWipBobina(null);
+    setWipScanInput("");
+    setWipBaixaTotal(false);
+
     setFormData(prev => ({
       ...prev,
       opId: selectedOpId,
@@ -777,6 +810,64 @@ export function DailyLaunches({
       larguraMm: parsedLargura,
       espessuraMicras: parsedEspessura,
     }));
+  };
+
+  // Bobinas Semiacabadas (WIP) disponíveis no pátio para a OP selecionada no modal
+  const availableWipBobinas = useMemo(() => {
+    if (!activeModal) return [];
+    const currentOp = orders.find(o => o.id === formData.opId) || activeModal.order;
+    if (!currentOp) return [];
+
+    const machSector = (activeModal.machine.setor || "").toUpperCase().trim();
+    const activeList = wipBobinas.filter(
+      (b) => (b.status === "DISPONIVEL" || b.status === "EM_USO") && Number(b.peso_liquido_kg) > 0
+    );
+
+    // 1. Regra prioritária: Bobinas da OP com destino para o setor desta máquina selecionada
+    const opSectorMatched = activeList.filter(
+      (b) => isBobinaMatchOrder(b, currentOp) && doesBobinaMatchSector(b.setor_destino, machSector)
+    );
+    if (opSectorMatched.length > 0) return opSectorMatched;
+
+    // 2. Se não houver bobinas da OP com esse destino específico, mas houver outras bobinas no pátio destinadas a este setor
+    const sectorMatched = activeList.filter((b) => doesBobinaMatchSector(b.setor_destino, machSector));
+    if (sectorMatched.length > 0) return sectorMatched;
+
+    return activeList;
+  }, [activeModal, formData.opId, orders, wipBobinas]);
+
+  // Função para identificar bobina via bipagem de QR Code ou digitação
+  const handleScanWipBobina = (query: string) => {
+    const q = query.trim().toUpperCase();
+    if (!q) return;
+
+    // 1. Tentar encontrar entre as bobinas da OP selecionada
+    const match = availableWipBobinas.find(b =>
+      b.numero_bobina.toUpperCase() === q ||
+      q.includes(b.numero_bobina.toUpperCase()) ||
+      b.numero_bobina.toUpperCase().includes(q)
+    );
+
+    if (match) {
+      setSelectedWipBobina(match);
+      setWipScanInput("");
+      notify(`Bobina ${match.numero_bobina} (${match.peso_liquido_kg} kg) vinculada ao apontamento!`);
+      return;
+    }
+
+    // 2. Se não encontrou na OP, buscar em todo o pátio ativo
+    const anyMatch = wipBobinas.find(b =>
+      (b.status === "DISPONIVEL" || b.status === "EM_USO") &&
+      (b.numero_bobina.toUpperCase() === q || q.includes(b.numero_bobina.toUpperCase()))
+    );
+
+    if (anyMatch) {
+      setSelectedWipBobina(anyMatch);
+      setWipScanInput("");
+      notify(`Bobina ${anyMatch.numero_bobina} (${anyMatch.peso_liquido_kg} kg) identificada e vinculada!`);
+    } else {
+      notify(`Bobina "${query}" não encontrada com saldo disponível no pátio.`);
+    }
   };
 
   // Salvar Apontamento
@@ -809,6 +900,8 @@ export function DailyLaunches({
         aparas: formData.aparas ? String(number(formData.aparas)) : "0",
         picote: formData.picote ? String(number(formData.picote)) : "0",
         maquinaId: machine.id,
+        bobinaWipOrigem: selectedWipBobina ? selectedWipBobina.numero_bobina : undefined,
+        bobinasWipConsumidas: selectedWipBobina ? [selectedWipBobina.numero_bobina] : undefined,
       };
 
       // 1. Salvar o registro de produção
@@ -818,9 +911,51 @@ export function DailyLaunches({
         await saveProduction(selectedOrder, machine, inputRecord);
       }
 
+      // 2. Se houver bobina semiacabada (WIP) vinculada para consumo
+      let resumoConsumoWip = "";
+      if (selectedWipBobina) {
+        const perdas = number(formData.aparas) + number(formData.picote);
+        const consumoTotal = qtd + perdas;
+        const pesoOriginal = Number(selectedWipBobina.peso_liquido_kg) || 0;
+        const saldoRestante = Math.max(0, pesoOriginal - consumoTotal);
+        const deveFinalizar = wipBaixaTotal || saldoRestante <= 0.1;
+
+        try {
+          await consumirBobinaWip({
+            bobinaId: selectedWipBobina.id,
+            pesoConsumidoKg: consumoTotal > 0 ? consumoTotal : pesoOriginal,
+            baixaTotal: deveFinalizar,
+            opId: selectedOrder.numeroOp || selectedOrder.id,
+            setor: machine.setor,
+            maquinaNome: machine.name,
+            operador: formData.operador || "Operador",
+          });
+
+          resumoConsumoWip = deveFinalizar
+            ? ` · Bobina ${selectedWipBobina.numero_bobina} consumida 100%`
+            : ` · Bobina ${selectedWipBobina.numero_bobina} (saldo restante: ${saldoRestante.toFixed(1)} kg no pátio)`;
+
+          // Atualiza estado local de WIP
+          setWipBobinas(prev =>
+            prev.map(b => {
+              if (b.id === selectedWipBobina.id) {
+                return {
+                  ...b,
+                  peso_liquido_kg: deveFinalizar ? 0 : Number(saldoRestante.toFixed(2)),
+                  status: deveFinalizar ? "CONSUMIDA" : "DISPONIVEL",
+                };
+              }
+              return b;
+            })
+          );
+        } catch (consumeErr) {
+          console.warn("Aviso ao consumir bobina semiacabada:", consumeErr);
+        }
+      }
+
       let createdBobina: BobinaSemiAcabada | null = null;
 
-      // 2. Se for Extrusão e optou por gerar Bobina WIP
+      // 3. Se for Extrusão e optou por gerar Bobina WIP
       if (formData.gerarBobinaWip) {
         const numeroBobina =
           formData.numeroBobina.trim() ||
@@ -861,7 +996,7 @@ export function DailyLaunches({
       }
 
       notify(
-        `Apontamento de ${qtd} kg registrado com sucesso na máquina ${machine.name}!`
+        `Apontamento de ${qtd} kg registrado com sucesso na máquina ${machine.name}!${resumoConsumoWip}`
       );
 
       // Mantém a OP apontada imediatamente visível no card da máquina
@@ -1914,6 +2049,149 @@ export function DailyLaunches({
                   {operators.length} operadores cadastrados disponíveis
                 </small>
               </label>
+
+              {/* Seção: Alimentação de Bobinas Semiacabadas (WIP / Matéria-Prima) */}
+              <div className="deadline-form-block bg-slate-50/80 border border-slate-200 p-3 rounded-lg space-y-3">
+                <div className="flex items-center justify-between">
+                  <p className="eyebrow flex items-center gap-1.5 text-indigo-700 font-bold">
+                    <Layers className="w-3.5 h-3.5 text-indigo-600" />
+                    BOBINA SEMIACABADA DE ENTRADA (WIP)
+                  </p>
+                  {selectedWipBobina && (
+                    <button
+                      type="button"
+                      onClick={() => setSelectedWipBobina(null)}
+                      className="text-[11px] text-red-600 hover:text-red-800 font-medium underline"
+                    >
+                      Desvincular bobina
+                    </button>
+                  )}
+                </div>
+
+                {/* Bipagem ou busca de código */}
+                <div className="flex gap-2">
+                  <div className="relative flex-1">
+                    <Barcode className="absolute left-2.5 top-2.5 w-4 h-4 text-slate-400" />
+                    <input
+                      type="text"
+                      value={wipScanInput}
+                      onChange={e => setWipScanInput(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          handleScanWipBobina(wipScanInput);
+                        }
+                      }}
+                      placeholder="Bipar QR Code da etiqueta ou digitar código (ex: PAL-01-BOB-01)..."
+                      className="w-full pl-9 pr-3 py-1.5 text-xs bg-white border border-slate-300 rounded font-mono uppercase focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleScanWipBobina(wipScanInput)}
+                    className="px-3 py-1.5 text-xs bg-slate-800 hover:bg-slate-900 text-white font-medium rounded flex items-center gap-1.5 shrink-0 transition-colors"
+                  >
+                    <QrCode className="w-3.5 h-3.5" />
+                    <span>Bipar</span>
+                  </button>
+                </div>
+
+                {/* Lista de bobinas disponíveis da OP */}
+                {availableWipBobinas.length > 0 && !selectedWipBobina && (
+                  <div className="space-y-1.5">
+                    <span className="text-[11px] font-semibold text-slate-600 block">
+                      Bobinas disponíveis da OP no pátio ({availableWipBobinas.length}):
+                    </span>
+                    <div className="grid grid-cols-2 gap-2 max-h-36 overflow-y-auto pr-1">
+                      {availableWipBobinas.map(b => (
+                        <button
+                          key={b.id}
+                          type="button"
+                          onClick={() => {
+                            setSelectedWipBobina(b);
+                            notify(`Bobina ${b.numero_bobina} (${b.peso_liquido_kg} kg) selecionada.`);
+                          }}
+                          className="flex flex-col text-left p-2 rounded border border-slate-200 bg-white hover:border-indigo-400 hover:bg-indigo-50/50 transition-all text-xs"
+                        >
+                          <div className="font-mono font-bold text-slate-800 truncate">
+                            {b.numero_bobina}
+                          </div>
+                          <div className="flex items-center justify-between text-[11px] text-slate-500 mt-1 font-mono">
+                            <span className="font-semibold text-slate-700">{Number(b.peso_liquido_kg).toFixed(1)} kg</span>
+                            <span>{b.largura_mm ? `${b.largura_mm}mm` : "Extrusão"}</span>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Exibição detalhada e balanço da bobina selecionada */}
+                {selectedWipBobina && (() => {
+                  const pesoOriginal = Number(selectedWipBobina.peso_liquido_kg) || 0;
+                  const pesoProd = number(formData.qtdProduzido);
+                  const perdas = number(formData.aparas) + number(formData.picote);
+                  const consumo = pesoProd + perdas;
+                  const saldoRestante = Math.max(0, pesoOriginal - consumo);
+
+                  return (
+                    <div className="bg-indigo-50/70 border border-indigo-200 p-2.5 rounded text-xs space-y-2">
+                      <div className="flex items-center justify-between font-mono">
+                        <span className="font-bold text-indigo-900 flex items-center gap-1.5">
+                          <Check className="w-3.5 h-3.5 text-indigo-700" />
+                          Bobina Mãe: {selectedWipBobina.numero_bobina}
+                        </span>
+                        <span className="text-[11px] text-indigo-700 bg-indigo-100/80 px-2 py-0.5 rounded">
+                          Origem: {selectedWipBobina.setor_origem}
+                        </span>
+                      </div>
+
+                      {/* Balanço de massa em tempo real */}
+                      <div className="grid grid-cols-3 gap-2 text-center py-1 bg-white/80 rounded border border-indigo-100 font-mono">
+                        <div>
+                          <div className="text-[10px] text-slate-500 uppercase">Saldo Entrada</div>
+                          <div className="font-bold text-slate-800">{pesoOriginal.toFixed(1)} kg</div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] text-indigo-600 uppercase">Consumo Apontado</div>
+                          <div className="font-bold text-indigo-900">{consumo.toFixed(1)} kg</div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] text-slate-500 uppercase">Saldo Devolvido</div>
+                          <div className={`font-bold ${saldoRestante > 0 ? "text-emerald-700" : "text-slate-400"}`}>
+                            {saldoRestante.toFixed(1)} kg
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Decisão de baixa / saldo residual */}
+                      <div className="pt-1 flex items-center justify-between text-[11px]">
+                        <label className="flex items-center gap-1.5 cursor-pointer text-slate-700 font-medium">
+                          <input
+                            type="checkbox"
+                            checked={wipBaixaTotal || saldoRestante <= 0.1}
+                            disabled={saldoRestante <= 0.1}
+                            onChange={e => setWipBaixaTotal(e.target.checked)}
+                            className="w-3.5 h-3.5 text-indigo-600 rounded"
+                          />
+                          <span>Baixa total (bobina 100% consumida no processo)</span>
+                        </label>
+                        {!wipBaixaTotal && saldoRestante > 0.1 && (
+                          <span className="text-emerald-700 font-semibold">
+                            ✓ {saldoRestante.toFixed(1)} kg retornam ao pátio
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {availableWipBobinas.length === 0 && !selectedWipBobina && (
+                  <p className="text-[11px] text-slate-500 italic">
+                    Nenhuma bobina semiacabada da Extrusão vinculada a esta OP no momento. Você pode bipar ou digitar um código no campo acima se estiver utilizando uma bobina avulsa.
+                  </p>
+                )}
+              </div>
 
               {/* Quantidade produzida */}
               <label className="field">

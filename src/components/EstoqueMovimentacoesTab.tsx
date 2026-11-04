@@ -456,6 +456,18 @@ export function EstoqueMovimentacoesTab({
                       text: "text-amber-700",
                       icon: <Repeat className="w-3.5 h-3.5" />,
                     },
+                    CONSUMO_PRODUCAO: {
+                      label: "Consumo Produção",
+                      bg: "bg-blue-50 text-blue-700 border-blue-200",
+                      text: "text-blue-700",
+                      icon: <ArrowUpRight className="w-3.5 h-3.5" />,
+                    },
+                    CONSUMO_WIP: {
+                      label: "Consumo WIP",
+                      bg: "bg-indigo-50 text-indigo-700 border-indigo-200",
+                      text: "text-indigo-700",
+                      icon: <ArrowUpRight className="w-3.5 h-3.5" />,
+                    },
                     AJUSTE_INVENTARIO: {
                       label: "Ajuste Inventário",
                       bg: "bg-slate-100 text-slate-700 border-slate-200",
