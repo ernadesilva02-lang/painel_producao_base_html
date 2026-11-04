@@ -50,9 +50,11 @@ export interface EtiquetaZebraData {
   incluirIdentificacaoOp?: boolean; // Padrão true para rastreabilidade e bipagem
   codigoOp?: string;
   numeroPalete?: string;
-  operador?: string;      // Operador responsável da máquina (ex: "ALAN", "CLAUDIANO")
+  operador?: string;      // Operador responsável da máquina (ex: "ALAN", "EDINARDO")
+  maquinaNome?: string;   // Nome da máquina selecionada (ex: "CF1- HECE 1000", "CF2 - HECE 1100")
   setorOrigem?: string;   // Ex: "EXTRUSÃO", "REBOBINADEIRA"
   setorDestino?: string;  // Ex: "IMPRESSÃO", "LAMINAÇÃO", "REBOBINADEIRA", "CORTE/SOLDA"
+  isCorteSolda?: boolean; // Setor de Corte e Solda (imprime peso e unidades)
   tipoCodigoBipagem?: "qrcode" | "barcode" | "nenhum"; // Padrão: "qrcode" para bipagem rápida
   // Campos de ajuste avançado de direção e envio para impressoras térmicas
   modoEnvioCss?: "dimensoes_puras" | "auto" | "forcar_paisagem" | "forcar_retrato" | "tamanho_invertido";
@@ -342,6 +344,7 @@ export interface EtiquetaBobinaItem {
   pesoBruto: number;
   tara: number;
   pesoLiquido: number;
+  quantidadeUnidades?: number; // Qtd em unidades/peças (Corte e Solda)
   horario?: string;
 }
 
@@ -511,8 +514,13 @@ export function inferEtiquetaZebraData(
     codigoOp: order?.numeroOp || order?.numeroPedido || palete?.numeroOp || "",
     numeroPalete: palete?.numeroPalete || "",
     operador: palete?.operador || undefined,
+    maquinaNome: palete?.maquinaNome || palete?.maquinaId || (typeof (order as any)?.maquinaNome === 'string' ? (order as any).maquinaNome : order?.maquinaId) || "CF1- HECE 1000",
     setorOrigem: palete?.setor || undefined,
     setorDestino: palete?.setorDestino || ((palete?.setor || "").toUpperCase().includes("EXTRUS") ? "IMPRESSÃO" : undefined),
+    isCorteSolda: Boolean(
+      (palete?.setor || "").toUpperCase().includes("CORTE") ||
+      (palete?.setor || "").toUpperCase().includes("SOLDA")
+    ),
   };
 }
 
@@ -618,6 +626,100 @@ export function buildEtiquetasHtml(
         ? generateBarcode128Svg(bipCode, 74, 24)
         : generateQrCodeSvg(bipCode, 58);
 
+      // MODELO EXATO CORTE E SOLDA (FOTO DO USUÁRIO)
+      if (config.isCorteSolda || (item.quantidadeUnidades && item.quantidadeUnidades > 0)) {
+        return `
+        <div class="etiqueta-zebra-card format-100x30 is-corte-solda" style="width: ${singleWidthMm}mm; height: ${singleHeightMm}mm;">
+          <!-- SEÇÃO PRINCIPAL DE DADOS (ESQUERDA) -->
+          <div class="corte-main-section">
+            <!-- LINHA 1: TOPO (FORPACK · ITEM #02 · DATA: 04/11/2026) -->
+            <div class="corte-header-row">
+              <div class="corte-brand">
+                <span class="corte-logo-f">f</span>
+                <span class="corte-brand-name">FORPACK</span>
+              </div>
+              <div class="corte-item-badge">
+                ITEM #${item.posicao.toString().padStart(2, "0")}
+              </div>
+              <div class="corte-date">
+                DATA: <strong>${config.dataImpressao}</strong>
+              </div>
+            </div>
+
+            <div class="corte-divider-line"></div>
+
+            <!-- LINHA 2: CORPO COM CLIENTE, ITEM E FILME (LARGURA TOTAL SEM CORTAR O ITEM) -->
+            <div class="corte-body-info">
+              <div class="corte-info-line">
+                <span class="corte-info-label">CLIENTE:</span>
+                <span class="corte-info-val corte-cliente-val" style="${(config.cliente || '').length > 25 ? 'font-size: 8px; letter-spacing: -0.25px;' : ''}">${config.cliente || "CLIENTE"}</span>
+              </div>
+              <div class="corte-info-line">
+                <span class="corte-info-label">ITEM:</span>
+                <span class="corte-info-val corte-item-val" style="${(config.aplicacao || config.itemDescricao || '').length > 30 ? 'font-size: 7.8px; letter-spacing: -0.25px;' : ''}">${config.aplicacao || config.itemDescricao || "PRODUTO"}</span>
+              </div>
+              <div class="corte-info-line">
+                <span class="corte-info-label">FILME:</span>
+                <span class="corte-info-val">${config.tipoFilme || "FILME PEBD"}</span>
+              </div>
+            </div>
+
+            <div class="corte-divider-line"></div>
+
+            <!-- LINHA 3: RODAPÉ COM 3 COMPARTIMENTOS -->
+            <div class="corte-footer-grid">
+              <!-- COMPARTIMENTO 1: PESO LÍQUIDO -->
+              <div class="corte-footer-box box-peso">
+                <div class="box-peso-lbl">
+                  <span>PESO</span>
+                  <span>LÍQUIDO:</span>
+                </div>
+                <div class="box-peso-val">
+                  <span class="box-peso-num">${hasWeights ? item.pesoLiquido.toFixed(1) : (item.pesoLiquido > 0 ? item.pesoLiquido.toFixed(1) : "—")}</span>
+                  <span class="box-peso-unit">KG</span>
+                </div>
+              </div>
+
+              <!-- COMPARTIMENTO 2: QUANTIDADE & UNIDADE -->
+              <div class="corte-footer-box box-qtd">
+                <div class="box-qtd-row">
+                  <span class="box-qtd-lbl">Qtd</span>
+                  <span class="box-qtd-val">${item.quantidadeUnidades ? item.quantidadeUnidades.toLocaleString("pt-BR") : "300"}</span>
+                </div>
+                <div class="box-qtd-row">
+                  <span class="box-qtd-lbl">Unidade:</span>
+                  <span class="box-qtd-val">UND</span>
+                </div>
+              </div>
+
+              <!-- COMPARTIMENTO 3: MÁQUINA & OPERADOR -->
+              <div class="corte-footer-box box-maq">
+                <div class="box-maq-lbl">MAQUINA:</div>
+                <div class="box-maq-name">${config.maquinaNome || "CF1- HECE 1000"}</div>
+                <div class="box-oper-row">
+                  <span class="box-oper-badge">OPER:</span>
+                  <span class="box-oper-name">${config.operador || "EDINARDO"}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- SEÇÃO DIREITA: QR CODE COM DELINEAÇÃO PONTILHADA -->
+          <div class="corte-qr-section">
+            <div class="corte-qr-code">
+              ${codeSvg}
+            </div>
+            <div class="corte-qr-vol">
+              VOL-${item.posicao.toString().padStart(2, "0")}
+            </div>
+            <div class="corte-qr-badge">
+              BIPAGEM
+            </div>
+          </div>
+        </div>`;
+      }
+
+      // LAYOUT PADRÃO 100x30 (EXTRUSÃO / REBOBINADEIRA)
       return `
       <div class="etiqueta-zebra-card format-100x30" style="width: ${singleWidthMm}mm; height: ${singleHeightMm}mm;">
         <!-- COLUNA PRINCIPAL DE DADOS -->
@@ -669,7 +771,7 @@ export function buildEtiquetasHtml(
 
           <div class="divider-line"></div>
 
-          <!-- RODAPÉ: METROLOGIA (SEM TARA - APENAS PESO BRUTO E LÍQUIDO) -->
+          <!-- RODAPÉ: METROLOGIA (PESO BRUTO E LÍQUIDO) -->
           <div class="card-footer-100x30">
             <div class="footer-peso-box">
               <span class="peso-title">PESO BRUTO:</span>
@@ -714,12 +816,19 @@ export function buildEtiquetasHtml(
       <!-- LINHA 3: MEDIDAS (Ex: 69X0,028) -->
       <div class="line-3-medidas">${config.medidas}</div>
 
-      <!-- LINHA 4: PESOS (PESO B: ... L: ...) -->
+      <!-- LINHA 4: PESOS E UNIDADES -->
       <div class="line-4-peso">
+        ${(config.isCorteSolda || (item.quantidadeUnidades && item.quantidadeUnidades > 0)) ? `
+        <span class="peso-b-label">PESO:</span>
+        <span class="peso-b-val">${hasWeights ? `${item.pesoLiquido.toFixed(1)}kg` : "—"}</span>
+        <span class="peso-l-label" style="margin-left:4px;">QTD:</span>
+        <span class="peso-l-val" style="font-weight:900;color:#1e3a8a;">${item.quantidadeUnidades ? `${item.quantidadeUnidades.toLocaleString("pt-BR")} UN` : "—"}</span>
+        ` : `
         <span class="peso-b-label">PESO B:</span>
         <span class="peso-b-val">${pesoBVal}</span>
         <span class="peso-l-label">L:</span>
         <span class="peso-l-val">${pesoLVal}</span>
+        `}
       </div>
 
       <!-- LINHA 5: DATA E LOGO FORPACK -->
@@ -1328,6 +1437,281 @@ export function buildEtiquetasHtml(
       font-family: monospace;
       color: #64748b;
     }
+
+    /* ESTILOS CORTE E SOLDA (MODELO EXATO DA FOTO ANEXADA) */
+    .etiqueta-zebra-card.is-corte-solda {
+      border: 1.8px solid #000 !important;
+      border-radius: 6px !important;
+      padding: 1.2mm 2mm 1mm 2.2mm !important;
+      display: flex !important;
+      flex-direction: row !important;
+      justify-content: space-between !important;
+      text-align: left !important;
+      background: #fff !important;
+    }
+    .corte-main-section {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding-right: 2.2mm;
+    }
+    .corte-header-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      line-height: 1;
+      padding-bottom: 0.2mm;
+    }
+    .corte-brand {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+    }
+    .corte-logo-f {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #000;
+      color: #fff;
+      font-weight: 900;
+      font-size: 10px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      line-height: 1;
+    }
+    .corte-brand-name {
+      font-size: 12px;
+      font-weight: 900;
+      letter-spacing: 0.5px;
+      color: #000;
+    }
+    .corte-item-badge {
+      font-size: 11px;
+      font-weight: 900;
+      letter-spacing: 0.2px;
+      color: #000;
+      font-family: Arial, sans-serif;
+    }
+    .corte-date {
+      font-size: 10px;
+      font-weight: 900;
+      color: #000;
+      letter-spacing: -0.1px;
+    }
+    .corte-divider-line {
+      width: 100%;
+      height: 1.8px;
+      background: #000;
+      margin: 0.4mm 0;
+    }
+    .corte-body-info {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-around;
+      flex: 1;
+      padding: 0.3mm 0;
+      min-width: 0;
+    }
+    .corte-info-line {
+      display: flex;
+      align-items: baseline;
+      gap: 4px;
+      line-height: 1.2;
+      overflow: hidden;
+      white-space: nowrap;
+    }
+    .corte-info-label {
+      font-size: 8px;
+      font-weight: 900;
+      color: #1e3a8a;
+      letter-spacing: 0.1px;
+      flex-shrink: 0;
+    }
+    .corte-info-val {
+      font-size: 9.5px;
+      font-weight: 800;
+      color: #000;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      text-transform: uppercase;
+      letter-spacing: -0.15px;
+    }
+    .corte-info-val.corte-cliente-val {
+      font-size: 9px;
+      font-weight: 800;
+      letter-spacing: -0.15px;
+    }
+    .corte-info-val.corte-item-val {
+      font-size: 8.5px;
+      font-weight: 800;
+      letter-spacing: -0.2px;
+    }
+    .corte-footer-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1.35fr;
+      height: 10mm;
+      align-items: stretch;
+    }
+    .corte-footer-box {
+      padding: 0 3px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      overflow: hidden;
+    }
+    .corte-footer-box:not(:last-child) {
+      border-right: 1.8px solid #000;
+    }
+    .corte-footer-box.box-peso {
+      display: flex;
+      flex-direction: row;
+      align-items: center;
+      justify-content: space-between;
+      padding-right: 4px;
+    }
+    .box-peso-lbl {
+      display: flex;
+      flex-direction: column;
+      font-size: 7.5px;
+      font-weight: 900;
+      color: #1e3a8a;
+      line-height: 1.1;
+    }
+    .box-peso-val {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      line-height: 1;
+    }
+    .box-peso-num {
+      font-size: 15px;
+      font-weight: 900;
+      font-family: Arial, monospace;
+      color: #000;
+      line-height: 1;
+    }
+    .box-peso-unit {
+      font-size: 10.5px;
+      font-weight: 900;
+      color: #000;
+      line-height: 1;
+      margin-top: 1px;
+    }
+    .corte-footer-box.box-qtd {
+      padding: 0 4px;
+      gap: 1.5px;
+    }
+    .box-qtd-row {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      line-height: 1.15;
+    }
+    .box-qtd-lbl {
+      font-size: 9.5px;
+      font-weight: 700;
+      color: #000;
+    }
+    .box-qtd-val {
+      font-size: 12px;
+      font-weight: 900;
+      color: #000;
+      font-family: Arial, monospace;
+    }
+    .corte-footer-box.box-maq {
+      padding-left: 4px;
+      gap: 0.5px;
+      min-width: 0;
+    }
+    .box-maq-lbl {
+      font-size: 7.5px;
+      font-weight: 800;
+      color: #000;
+      line-height: 1;
+    }
+    .box-maq-name {
+      font-size: 8.5px;
+      font-weight: 800;
+      color: #000;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      line-height: 1.15;
+      letter-spacing: -0.2px;
+    }
+    .box-oper-row {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      margin-top: 1px;
+      line-height: 1;
+      min-width: 0;
+    }
+    .box-oper-badge {
+      font-size: 6.8px;
+      font-weight: 900;
+      color: #334155;
+      background: #f1f5f9;
+      border: 1px solid #cbd5e1;
+      border-radius: 2px;
+      padding: 0.5px 2px;
+      flex-shrink: 0;
+    }
+    .box-oper-name {
+      font-size: 8px;
+      font-weight: 800;
+      color: #000;
+      text-transform: uppercase;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      letter-spacing: -0.2px;
+    }
+    .corte-qr-section {
+      width: 22mm;
+      border-left: 1.8px dotted #000;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding-left: 1.5mm;
+      flex-shrink: 0;
+    }
+    .corte-qr-code {
+      width: 17.5mm;
+      height: 17.5mm;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+    .corte-qr-code svg {
+      width: 100%;
+      height: 100%;
+    }
+    .corte-qr-vol {
+      font-size: 8px;
+      font-weight: 900;
+      color: #000;
+      font-family: Arial, monospace;
+      margin-top: 1px;
+      line-height: 1;
+    }
+    .corte-qr-badge {
+      background: #000;
+      color: #fff;
+      font-size: 7px;
+      font-weight: 900;
+      padding: 1px 5px;
+      border-radius: 3px;
+      letter-spacing: 0.5px;
+      margin-top: 1px;
+      line-height: 1.2;
+    }
   </style>
 </head>
 <body>
@@ -1467,15 +1851,20 @@ export function generateZplCode(
   const buildSingleLabelZpl100x30 = (item: EtiquetaBobinaItem | null, xOffset: number) => {
     if (!item) return "";
     const hasWeights = config.imprimirPesos && item.pesoBruto > 0;
-    const pesoBText = hasWeights ? `PESO BRUTO: ${item.pesoBruto.toFixed(1)} KG` : "PESO BRUTO: ________ KG";
-    const pesoLText = hasWeights ? `PESO LÍQ: ${item.pesoLiquido.toFixed(1)} KG` : "PESO LÍQ: ________ KG";
+    const hasUnits = Boolean(item.quantidadeUnidades && item.quantidadeUnidades > 0);
+    const pesoBText = hasUnits
+      ? `PESO: ${item.pesoLiquido.toFixed(1)} KG`
+      : (hasWeights ? `PESO BRUTO: ${item.pesoBruto.toFixed(1)} KG` : "PESO BRUTO: ________ KG");
+    const pesoLText = hasUnits
+      ? `QTD: ${item.quantidadeUnidades?.toLocaleString("pt-BR")} UN`
+      : (hasWeights ? `PESO LÍQ: ${item.pesoLiquido.toFixed(1)} KG` : "PESO LÍQ: ________ KG");
     const bipCode = config.codigoOp
       ? `${config.codigoOp}-${item.posicao.toString().padStart(2, "0")}`
       : (item.codigoBobina || `BOB-${item.posicao.toString().padStart(2, "0")}`);
     const hasBipagem = config.tipoCodigoBipagem !== "nenhum";
     const clientName = (config.cliente || "CLIENTE").toUpperCase();
     const itemName = (config.aplicacao || config.itemDescricao || "PRODUTO").toUpperCase();
-    const itemNumStr = `ITEM #${item.posicao.toString().padStart(2, "0")}`;
+    const itemNumStr = (config.isCorteSolda || hasUnits) ? `VOL #${item.posicao.toString().padStart(2, "0")}` : `ITEM #${item.posicao.toString().padStart(2, "0")}`;
 
     // Largura da seção de dados técnicos
     const mainWidth = hasBipagem ? 585 : 755;
@@ -1508,6 +1897,70 @@ export function generateZplCode(
     const filmeZpl = fullDestino
       ? `^A0N,17,17\n^FO${xOffset + 20},91^FB210,1,0,L^FDFILME: ${config.tipoFilme}^FS\n^A0N,15,15\n^FO${xOffset + 235},91^FB${mainWidth - 235 - 150},1,0,L^FDDESTINO: ${fullDestino}^FS`
       : `^A0N,17,17\n^FO${xOffset + 20},91^FB${mainWidth - 165},1,0,L^FDFILME: ${config.tipoFilme}^FS`;
+
+    // SE FOR CORTE E SOLDA: GERA ZPL NO MODELO EXATO DA FOTO ANEXADA
+    if (config.isCorteSolda || hasUnits) {
+      const pesoNum = hasWeights ? item.pesoLiquido.toFixed(1) : (item.pesoLiquido > 0 ? item.pesoLiquido.toFixed(1) : "—");
+      const qtdNum = item.quantidadeUnidades ? item.quantidadeUnidades.toLocaleString("pt-BR") : "300";
+      const maqStr = (config.maquinaNome || "CF1- HECE 1000").toUpperCase();
+      const opStr = (config.operador || "EDINARDO").toUpperCase();
+      const posStr = item.posicao.toString().padStart(2, "0");
+
+      // Fontes dinâmicas calibradas para que títulos longos e nomes de operadores não sejam cortados
+      const clientFont = clientName.length > 28 ? "^A0N,15,13" : "^A0N,17,15";
+      const itemFont = itemName.length > 35 ? "^A0N,14,12" : (itemName.length > 25 ? "^A0N,16,14" : "^A0N,18,16");
+      const maqFont = maqStr.length > 15 ? "^A0N,14,13" : "^A0N,16,15";
+      const opFont = opStr.length > 9 ? "^A0N,13,12" : "^A0N,15,14";
+
+      return `^FO${xOffset + 20},14^GB22,22,22,B,0^FS
+^A0N,18,18
+^FR^FO${xOffset + 27},16^FDf^FS
+^A0N,22,22
+^FO${xOffset + 48},16^FDForpack^FS
+^A0N,20,20
+^FO${xOffset + 225},16^FDITEM #${posStr}^FS
+^A0N,17,17
+^FO${xOffset + 420},18^FDDATA: ${config.dataImpressao}^FS
+^FO${xOffset + 20},38^GB${mainWidth},2,2^FS
+${clientFont}
+^FO${xOffset + 20},45^FB${mainWidth - 10},1,0,L^FDCLIENTE: ${clientName}^FS
+${itemFont}
+^FO${xOffset + 20},67^FB${mainWidth - 10},1,0,L^FDITEM: ${itemName}^FS
+^A0N,16,14
+^FO${xOffset + 20},89^FB${mainWidth - 10},1,0,L^FDFILME: ${(config.tipoFilme || "FILME PEBD").toUpperCase()}^FS
+^FO${xOffset + 20},110^GB${mainWidth},2,2^FS
+^A0N,14,14
+^FO${xOffset + 24},120^FDPESO^FS
+^A0N,14,14
+^FO${xOffset + 24},138^FDLÍQUIDO:^FS
+^A0N,32,32
+^FO${xOffset + 105},118^FD${pesoNum}^FS
+^A0N,20,20
+^FO${xOffset + 115},152^FDKG^FS
+^FO${xOffset + 185},110^GB2,124,2^FS
+^A0N,18,18
+^FO${xOffset + 195},124^FDQtd^FS
+^A0N,24,24
+^FO${xOffset + 270},120^FB100,1,0,R^FD${qtdNum}^FS
+^A0N,17,17
+^FO${xOffset + 195},162^FDUnidade:^FS
+^A0N,22,22
+^FO${xOffset + 310},158^FDUND^FS
+^FO${xOffset + 375},110^GB2,124,2^FS
+^A0N,13,13
+^FO${xOffset + 385},118^FDMAQUINA:^FS
+${maqFont}
+^FO${xOffset + 385},136^FB210,1,0,L^FD${maqStr}^FS
+${opFont}
+^FO${xOffset + 385},166^FB210,1,0,L^FDOPER: ${opStr}^FS
+^FO${xOffset + 605},8^GB2,226,2^FS
+^FO${xOffset + 636},16^BQN,2,4^FDQA,${bipCode}^FS
+^A0N,17,17
+^FO${xOffset + 610},140^FB175,1,0,C^FDVOL-${posStr}^FS
+^FO${xOffset + 635},176^GB125,28,14,B,0^FS
+^A0N,15,15
+^FR^FO${xOffset + 635},182^FB125,1,0,C^FDBIPAGEM^FS`;
+    }
 
     return `^FO${xOffset + 20},14^GB22,22,22,B,0^FS
 ^A0N,18,18
@@ -1542,12 +1995,15 @@ ${config.operador ? `^A0N,15,15\n^FO${xOffset + 465},126^FB${mainWidth - 465},1,
   const buildSingleLabelZpl = (item: EtiquetaBobinaItem | null, xOffset: number) => {
     if (!item) return "";
     const hasWeights = config.imprimirPesos && item.pesoBruto > 0;
-    const pesoText = hasWeights
-      ? `PESO B: ${item.pesoBruto.toFixed(1)}   L: ${item.pesoLiquido.toFixed(1)}`
-      : `PESO B:          L:`;
+    const hasUnits = Boolean(item.quantidadeUnidades && item.quantidadeUnidades > 0);
+    const pesoText = hasUnits
+      ? `PESO: ${item.pesoLiquido.toFixed(1)}KG  QTD: ${item.quantidadeUnidades}UN`
+      : (hasWeights
+          ? `PESO B: ${item.pesoBruto.toFixed(1)}   L: ${item.pesoLiquido.toFixed(1)}`
+          : `PESO B:          L:`);
 
     const traceText = config.incluirIdentificacaoOp
-      ? `OP #${config.codigoOp || ""} · ${item.codigoBobina || `BOB #${item.posicao}`}`
+      ? `OP #${config.codigoOp || ""} · ${item.codigoBobina || (hasUnits ? `VOL #${item.posicao}` : `BOB #${item.posicao}`)}`
       : "";
 
     return `^A0N,24,24
@@ -2467,120 +2923,246 @@ export function EtiquetaZebraModal({
                   <div className="bg-amber-100/90 rounded-md p-2.5 border border-amber-300 shadow-md w-full flex items-center justify-center gap-2 overflow-x-auto min-h-[145px]">
                     {/* FORMATO 100x30x1 (1 CARREIRA / PISTA ÚNICA) */}
                     {(config.tamanhoEtiqueta === "100x30" || (config.larguraMm || 0) >= 85) ? (
-                      <div
-                        className="bg-white text-slate-900 border border-slate-400 rounded-[6px] p-2 shadow-md flex flex-row items-stretch justify-between gap-2 text-left select-none shrink-0"
-                        style={{
-                          width: "330px",
-                          height: "108px",
-                          fontFamily: "Arial, Helvetica, sans-serif",
-                          ...previewRotationStyle,
-                        }}
-                      >
-                        {/* COLUNA ESQUERDA: DADOS TÉCNICOS DE PRODUÇÃO */}
-                        <div className="flex-1 min-w-0 flex flex-col justify-between">
-                          {/* HEADER: LOGO · OP & ITEM Nº · DATA */}
-                          <div className="flex items-center justify-between border-b border-slate-300 pb-0.5">
-                            <div className="flex items-center gap-1">
-                              <span className="w-3.5 h-3.5 bg-black text-white rounded-full flex items-center justify-center font-bold font-serif text-[7.5px] leading-none pb-0.5">
-                                f
-                              </span>
-                              <span className="font-black text-[9.5px] tracking-tight text-slate-900">
-                                FORPACK
-                              </span>
-                            </div>
-                            <div className="flex items-center gap-1.5 font-mono text-[8px] whitespace-nowrap">
-                              {config.codigoOp && (
-                                <span className="font-extrabold text-slate-900">
-                                  OP #{config.codigoOp}
+                      (config.isCorteSolda || (previewBobina.quantidadeUnidades && previewBobina.quantidadeUnidades > 0)) ? (
+                        /* SIMULADOR AO VIVO - MODELO EXATO CORTE E SOLDA */
+                        <div
+                          className="bg-white text-slate-900 border-2 border-black rounded-[6px] p-2 shadow-md flex flex-row items-stretch justify-between gap-1.5 text-left select-none shrink-0"
+                          style={{
+                            width: "350px",
+                            height: "115px",
+                            fontFamily: "Arial, Helvetica, sans-serif",
+                            ...previewRotationStyle,
+                          }}
+                        >
+                          {/* SEÇÃO PRINCIPAL (ESQUERDA) */}
+                          <div className="flex-1 min-w-0 flex flex-col justify-between pr-2">
+                            {/* LINHA 1: TOPO (FORPACK · ITEM #02 · DATA: 04/11/2026) */}
+                            <div className="flex items-center justify-between line-none pb-0.5">
+                              <div className="flex items-center gap-1.5">
+                                <span className="w-3.5 h-3.5 bg-black text-white rounded-full flex items-center justify-center font-bold font-serif text-[8px] leading-none">
+                                  f
                                 </span>
-                              )}
-                              <span className="font-extrabold text-slate-900">
+                                <span className="font-black text-[11px] tracking-tight text-black">
+                                  FORPACK
+                                </span>
+                              </div>
+                              <div className="font-black text-[10px] text-black">
                                 ITEM #{previewBobina.posicao.toString().padStart(2, "0")}
-                              </span>
-                            </div>
-                            {config.operador && (
-                              <div className="text-[7px] font-bold text-slate-800 bg-slate-100 px-1 py-0.2 rounded border border-slate-300 truncate max-w-[85px]" title={`Operador: ${config.operador}`}>
-                                <span className="text-[6.5px] font-extrabold text-slate-500">OPR:</span> {config.operador}
                               </div>
-                            )}
-                            <div className="text-[8px] font-bold text-slate-800 whitespace-nowrap shrink-0 ml-auto">
-                              DATA: {config.dataImpressao}
+                              <div className="text-[9px] font-bold text-black">
+                                DATA: {config.dataImpressao}
+                              </div>
                             </div>
-                          </div>
 
-                          {/* CORPO: CLIENTE, ITEM, MATERIAL & MEDIDAS */}
-                          <div className="flex items-center justify-between py-0.5 my-auto gap-1.5">
-                            <div className="flex-1 min-w-0">
-                              <div className="font-black text-[9px] tracking-tight uppercase leading-tight truncate text-slate-950 flex items-center gap-1">
-                                <span className="text-[7.5px] font-bold text-slate-500 shrink-0">CLIENTE:</span>
-                                <span className="truncate">{config.cliente || "CLIENTE"}</span>
+                            <div className="w-full h-[1.5px] bg-black my-0.5" />
+
+                            {/* LINHA 2: CORPO COM CLIENTE, ITEM E FILME (LARGURA TOTAL SEM CORTAR O ITEM) */}
+                            <div className="flex flex-col justify-around py-0.5 flex-1 min-w-0">
+                              <div className="flex items-baseline gap-1 leading-tight truncate">
+                                <span className="text-[7.5px] font-black text-blue-700 shrink-0">CLIENTE:</span>
+                                <span className="font-extrabold text-[8px] text-black truncate uppercase tracking-tight">
+                                  {config.cliente || "CLIENTE"}
+                                </span>
                               </div>
-                              <div className="font-extrabold text-[8.5px] tracking-tight uppercase leading-tight truncate text-slate-900 mt-0.5 flex items-center gap-1">
-                                <span className="text-[7.5px] font-bold text-slate-500 shrink-0">ITEM:</span>
-                                <span className="truncate">{config.aplicacao || config.itemDescricao || "PRODUTO"}</span>
+                              <div className="flex items-baseline gap-1 leading-tight truncate">
+                                <span className="text-[7.5px] font-black text-blue-700 shrink-0">ITEM:</span>
+                                <span className={`font-extrabold text-black uppercase tracking-tight truncate ${
+                                  (config.aplicacao || config.itemDescricao || "").length > 30 ? "text-[7.2px]" : "text-[7.8px]"
+                                }`}>
+                                  {config.aplicacao || config.itemDescricao || "PRODUTO"}
+                                </span>
                               </div>
-                              <div className="font-bold text-[8px] tracking-wide uppercase leading-tight text-slate-700 mt-0.5 flex items-center gap-1 overflow-hidden">
-                                <span className="text-[7px] font-bold text-slate-500 shrink-0">FILME:</span>
-                                <span className="truncate min-w-0">{config.tipoFilme || "FILME PEBD IMP"}</span>
-                                {config.setorDestino && (
-                                  <span className="text-[6.5px] font-black uppercase tracking-wider bg-slate-900 text-white px-1 py-0.5 rounded-2xs shrink-0 whitespace-nowrap ml-auto">
-                                    DESTINO: {getFullSectorDestinoName(config.setorDestino)}
+                              <div className="flex items-baseline gap-1 leading-tight truncate">
+                                <span className="text-[7.5px] font-black text-blue-700 shrink-0">FILME:</span>
+                                <span className="font-extrabold text-[8px] text-black truncate uppercase tracking-tight">
+                                  {config.tipoFilme || "FILME PEBD"}
+                                </span>
+                              </div>
+                            </div>
+
+                            <div className="w-full h-[1.5px] bg-black my-0.5" />
+
+                            {/* LINHA 3: RODAPÉ COM 3 COMPARTIMENTOS */}
+                            <div className="grid grid-cols-[1fr_1fr_1.35fr] h-[34px] items-stretch">
+                              {/* COMPARTIMENTO 1: PESO LÍQUIDO */}
+                              <div className="border-r-[1.5px] border-black pr-1.5 flex items-center justify-between">
+                                <div className="flex flex-col text-[7px] font-black text-blue-900 leading-tight">
+                                  <span>PESO</span>
+                                  <span>LÍQUIDO:</span>
+                                </div>
+                                <div className="flex flex-col items-end leading-none">
+                                  <span className="font-black text-sm font-mono text-black">
+                                    {previewBobina.pesoLiquido > 0 ? previewBobina.pesoLiquido.toFixed(1) : "12.5"}
                                   </span>
-                                )}
+                                  <span className="font-black text-[9px] text-black">KG</span>
+                                </div>
+                              </div>
+
+                              {/* COMPARTIMENTO 2: QUANTIDADE & UNIDADE */}
+                              <div className="border-r-[1.5px] border-black px-1.5 flex flex-col justify-center">
+                                <div className="flex items-baseline justify-between leading-tight">
+                                  <span className="text-[8px] font-bold text-black">Qtd</span>
+                                  <span className="font-black text-[10px] font-mono text-black">
+                                    {previewBobina.quantidadeUnidades ? previewBobina.quantidadeUnidades.toLocaleString("pt-BR") : "300"}
+                                  </span>
+                                </div>
+                                <div className="flex items-baseline justify-between leading-tight mt-0.5">
+                                  <span className="text-[8px] font-bold text-black">Unidade:</span>
+                                  <span className="font-black text-[9.5px] text-black">UND</span>
+                                </div>
+                              </div>
+
+                              {/* COMPARTIMENTO 3: MÁQUINA & OPERADOR */}
+                              <div className="pl-1.5 flex flex-col justify-center min-w-0">
+                                <span className="text-[6.5px] font-extrabold text-black uppercase leading-tight">
+                                  MAQUINA:
+                                </span>
+                                <span className="font-bold text-[7.5px] text-black uppercase truncate leading-tight tracking-tight">
+                                  {config.maquinaNome || "CF1- HECE 1000"}
+                                </span>
+                                <div className="flex items-center gap-1 mt-0.5 leading-none min-w-0">
+                                  <span className="text-[6px] font-black text-slate-600 bg-slate-100 border border-slate-300 rounded px-1 py-0.2 shrink-0">
+                                    OPER:
+                                  </span>
+                                  <span className="font-bold text-[7.2px] text-black uppercase truncate tracking-tight">
+                                    {config.operador || "EDINARDO"}
+                                  </span>
+                                </div>
                               </div>
                             </div>
-                            <div className="border-l border-slate-300 pl-1.5 text-right shrink-0">
-                              <span className="text-[7px] font-black uppercase text-slate-500 block leading-none">
-                                MEDIDAS
-                              </span>
-                              <span className="font-black text-xs text-slate-950 font-mono tracking-tight leading-tight block">
-                                {config.medidas || "69X0,028"}
-                              </span>
-                            </div>
                           </div>
 
-                          {/* RODAPÉ: METROLOGIA (SEM TARA - APENAS PESO BRUTO E LÍQUIDO) */}
-                          <div className="flex items-center justify-between border-t border-slate-300 pt-0.5 text-[8px]">
-                            <div className="flex items-center gap-1">
-                              <span className="font-black text-slate-600">PESO BRUTO:</span>
-                              <span className="font-bold font-mono text-[9px]">
-                                {config.imprimirPesos && previewBobina.pesoBruto > 0
-                                  ? `${previewBobina.pesoBruto.toFixed(1)} KG`
-                                  : "________ KG"}
-                              </span>
-                            </div>
-                            <div className="flex items-center gap-1">
-                              <span className="font-black text-slate-700">PESO LÍQUIDO:</span>
-                              <span className="font-black font-mono text-[9.5px] text-slate-950">
-                                {config.imprimirPesos && previewBobina.pesoLiquido > 0
-                                  ? `${previewBobina.pesoLiquido.toFixed(1)} KG`
-                                  : "________ KG"}
-                              </span>
-                            </div>
-                            {config.operador && (
-                              <span className="text-[6.5px] font-bold text-slate-700 bg-slate-100 px-1 py-0.2 rounded border border-slate-200 truncate max-w-[70px]">
-                                OP: {config.operador}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-
-                        {/* COLUNA DIREITA: BIPAGEM COM QR CODE OU CÓDIGO DE BARRAS */}
-                        {config.tipoCodigoBipagem !== "nenhum" && (
-                          <div className="w-[68px] border-l border-dashed border-slate-300 pl-1.5 flex flex-col items-center justify-center shrink-0">
+                          {/* SEÇÃO DIREITA: QR CODE COM DILINEAÇÃO PONTILHADA */}
+                          <div className="w-[66px] border-l-2 border-dotted border-black pl-1.5 flex flex-col items-center justify-center shrink-0">
                             <div
-                              className="w-full flex items-center justify-center max-h-[56px] overflow-hidden [&>svg]:max-w-full [&>svg]:h-auto"
+                              className="w-full flex items-center justify-center max-h-[52px] overflow-hidden [&>svg]:max-w-full [&>svg]:h-auto"
                               dangerouslySetInnerHTML={{ __html: previewCodeSvg }}
                             />
-                            <span className="text-[7px] font-mono font-bold text-slate-800 leading-tight mt-0.5 truncate max-w-full">
-                              {previewBipCode}
+                            <span className="text-[7.5px] font-mono font-black text-black leading-tight mt-0.5">
+                              VOL-{previewBobina.posicao.toString().padStart(2, "0")}
                             </span>
-                            <span className="text-[6px] font-black tracking-wider uppercase bg-black text-white px-1.5 py-0.2 rounded-xs mt-0.5">
+                            <span className="text-[6.5px] font-black tracking-wider uppercase bg-black text-white px-2 py-0.2 rounded-xs mt-0.5">
                               BIPAGEM
                             </span>
                           </div>
-                        )}
-                      </div>
+                        </div>
+                      ) : (
+                        /* SIMULADOR AO VIVO - FORMATO PADRÃO (EXTRUSÃO / REBOBINADEIRA) */
+                        <div
+                          className="bg-white text-slate-900 border border-slate-400 rounded-[6px] p-2 shadow-md flex flex-row items-stretch justify-between gap-2 text-left select-none shrink-0"
+                          style={{
+                            width: "330px",
+                            height: "108px",
+                            fontFamily: "Arial, Helvetica, sans-serif",
+                            ...previewRotationStyle,
+                          }}
+                        >
+                          {/* COLUNA ESQUERDA: DADOS TÉCNICOS DE PRODUÇÃO */}
+                          <div className="flex-1 min-w-0 flex flex-col justify-between">
+                            {/* HEADER: LOGO · OP & ITEM Nº · DATA */}
+                            <div className="flex items-center justify-between border-b border-slate-300 pb-0.5">
+                              <div className="flex items-center gap-1">
+                                <span className="w-3.5 h-3.5 bg-black text-white rounded-full flex items-center justify-center font-bold font-serif text-[7.5px] leading-none pb-0.5">
+                                  f
+                                </span>
+                                <span className="font-black text-[9.5px] tracking-tight text-slate-900">
+                                  FORPACK
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-1.5 font-mono text-[8px] whitespace-nowrap">
+                                {config.codigoOp && (
+                                  <span className="font-extrabold text-slate-900">
+                                    OP #{config.codigoOp}
+                                  </span>
+                                )}
+                                <span className="font-extrabold text-slate-900">
+                                  ITEM #{previewBobina.posicao.toString().padStart(2, "0")}
+                                </span>
+                              </div>
+                              {config.operador && (
+                                <div className="text-[7px] font-bold text-slate-800 bg-slate-100 px-1 py-0.2 rounded border border-slate-300 truncate max-w-[85px]" title={`Operador: ${config.operador}`}>
+                                  <span className="text-[6.5px] font-extrabold text-slate-500">OPR:</span> {config.operador}
+                                </div>
+                              )}
+                              <div className="text-[8px] font-bold text-slate-800 whitespace-nowrap shrink-0 ml-auto">
+                                DATA: {config.dataImpressao}
+                              </div>
+                            </div>
+
+                            {/* CORPO: CLIENTE, ITEM, MATERIAL & MEDIDAS */}
+                            <div className="flex items-center justify-between py-0.5 my-auto gap-1.5">
+                              <div className="flex-1 min-w-0">
+                                <div className="font-black text-[9px] tracking-tight uppercase leading-tight truncate text-slate-950 flex items-center gap-1">
+                                  <span className="text-[7.5px] font-bold text-slate-500 shrink-0">CLIENTE:</span>
+                                  <span className="truncate">{config.cliente || "CLIENTE"}</span>
+                                </div>
+                                <div className="font-extrabold text-[8.5px] tracking-tight uppercase leading-tight truncate text-slate-900 mt-0.5 flex items-center gap-1">
+                                  <span className="text-[7.5px] font-bold text-slate-500 shrink-0">ITEM:</span>
+                                  <span className="truncate">{config.aplicacao || config.itemDescricao || "PRODUTO"}</span>
+                                </div>
+                                <div className="font-bold text-[8px] tracking-wide uppercase leading-tight text-slate-700 mt-0.5 flex items-center gap-1 overflow-hidden">
+                                  <span className="text-[7px] font-bold text-slate-500 shrink-0">FILME:</span>
+                                  <span className="truncate min-w-0">{config.tipoFilme || "FILME PEBD IMP"}</span>
+                                  {config.setorDestino && (
+                                    <span className="text-[6.5px] font-black uppercase tracking-wider bg-slate-900 text-white px-1 py-0.5 rounded-2xs shrink-0 whitespace-nowrap ml-auto">
+                                      DESTINO: {getFullSectorDestinoName(config.setorDestino)}
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                              <div className="border-l border-slate-300 pl-1.5 text-right shrink-0">
+                                <span className="text-[7px] font-black uppercase text-slate-500 block leading-none">
+                                  MEDIDAS
+                                </span>
+                                <span className="font-black text-xs text-slate-950 font-mono tracking-tight leading-tight block">
+                                  {config.medidas || "69X0,028"}
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* RODAPÉ: METROLOGIA (SEM TARA - APENAS PESO BRUTO E LÍQUIDO) */}
+                            <div className="flex items-center justify-between border-t border-slate-300 pt-0.5 text-[8px]">
+                              <div className="flex items-center gap-1">
+                                <span className="font-black text-slate-600">PESO BRUTO:</span>
+                                <span className="font-bold font-mono text-[9px]">
+                                  {config.imprimirPesos && previewBobina.pesoBruto > 0
+                                    ? `${previewBobina.pesoBruto.toFixed(1)} KG`
+                                    : "________ KG"}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-1">
+                                <span className="font-black text-slate-700">PESO LÍQUIDO:</span>
+                                <span className="font-black font-mono text-[9.5px] text-slate-950">
+                                  {config.imprimirPesos && previewBobina.pesoLiquido > 0
+                                    ? `${previewBobina.pesoLiquido.toFixed(1)} KG`
+                                    : "________ KG"}
+                                </span>
+                              </div>
+                              {config.operador && (
+                                <span className="text-[6.5px] font-bold text-slate-700 bg-slate-100 px-1 py-0.2 rounded border border-slate-200 truncate max-w-[70px]">
+                                  OP: {config.operador}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* COLUNA DIREITA: BIPAGEM COM QR CODE OU CÓDIGO DE BARRAS */}
+                          {config.tipoCodigoBipagem !== "nenhum" && (
+                            <div className="w-[68px] border-l border-dashed border-slate-300 pl-1.5 flex flex-col items-center justify-center shrink-0">
+                              <div
+                                className="w-full flex items-center justify-center max-h-[56px] overflow-hidden [&>svg]:max-w-full [&>svg]:h-auto"
+                                dangerouslySetInnerHTML={{ __html: previewCodeSvg }}
+                              />
+                              <span className="text-[7px] font-mono font-bold text-slate-800 leading-tight mt-0.5 truncate max-w-full">
+                                {previewBipCode}
+                              </span>
+                              <span className="text-[6px] font-black tracking-wider uppercase bg-black text-white px-1.5 py-0.2 rounded-xs mt-0.5">
+                                BIPAGEM
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      )
                     ) : (
                       <>
                         {/* PISTA 1 (ESQUERDA) */}

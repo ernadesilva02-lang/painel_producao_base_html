@@ -260,11 +260,12 @@ export function DailyLaunches({
         await updateProduction({
           ...existingRecord,
           qtdProduzido: String(palete.pesoLiquidoTotal),
+          qtdUnidades: palete.totalUnidades ? String(palete.totalUnidades) : existingRecord.qtdUnidades,
           dataProducao: palete.data,
           turno: palete.turno,
           operador: palete.operador,
           maquinaId: machine.id,
-          descricaoItem: `${order.descricaoItem} (Palete ${palete.numeroPalete}: ${palete.totalVolumes} bobinas)`,
+          descricaoItem: `${order.descricaoItem} (Palete ${palete.numeroPalete}: ${palete.totalVolumes} ${palete.totalUnidades ? `volumes - ${palete.totalUnidades.toLocaleString("pt-BR")} un` : "bobinas"})`,
         });
 
         palete.idApontamentoProducao = existingRecord.id;
@@ -281,11 +282,12 @@ export function DailyLaunches({
       // 2. Não existe apontamento ainda: cadastra novo apontamento e vincula o id ao palete
       const prodInput: Production = {
         qtdProduzido: String(palete.pesoLiquidoTotal),
+        qtdUnidades: palete.totalUnidades ? String(palete.totalUnidades) : undefined,
         dataProducao: palete.data,
         turno: palete.turno,
         operador: palete.operador,
         maquinaId: machine.id,
-        descricaoItem: `${order.descricaoItem} (Palete ${palete.numeroPalete}: ${palete.totalVolumes} bobinas)`,
+        descricaoItem: `${order.descricaoItem} (Palete ${palete.numeroPalete}: ${palete.totalVolumes} ${palete.totalUnidades ? `volumes - ${palete.totalUnidades.toLocaleString("pt-BR")} un` : "bobinas"})`,
       };
 
       let registeredId: string | undefined;

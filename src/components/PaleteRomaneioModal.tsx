@@ -307,9 +307,9 @@ export function PaleteRomaneioModal({
     resolveMachine(machine, initialPalete, activeOrder, machines)
   );
 
-  const isExtrusao = Boolean(
-    (selectedMachine?.setor || initialPalete?.setor || machine?.setor || "").toUpperCase().includes("EXTRUS")
-  );
+  const currentSectorUpper = (selectedMachine?.setor || initialPalete?.setor || machine?.setor || "").toUpperCase();
+  const isExtrusao = Boolean(currentSectorUpper.includes("EXTRUS"));
+  const isCorteSolda = Boolean(currentSectorUpper.includes("CORTE") || currentSectorUpper.includes("SOLDA"));
 
   const [setorDestino, setSetorDestino] = useState<string>(() => {
     if (initialPalete?.setorDestino) return getFullSectorDestinoName(initialPalete.setorDestino);
@@ -330,15 +330,17 @@ export function PaleteRomaneioModal({
     if (initialPalete?.medidas) return initialPalete.medidas;
     return extractMedidasFromOrder(activeOrder);
   });
-  const [taraPadrao, setTaraPadrao] = useState(1.6); // 1.6 kg standard tubete tare
+  const [taraPadrao, setTaraPadrao] = useState(() => (isCorteSolda ? 0 : 1.6)); // Em corte/solda não há tubete
   const [status, setStatus] = useState<StatusPalete>("ABERTO");
   const [observacoes, setObservacoes] = useState("");
 
   // Items list
   const [itens, setItens] = useState<ItemPaleteRomaneio[]>([]);
 
-  // Fast weighing input station
+  // Fast weighing & units input station
   const [inputBruto, setInputBruto] = useState("");
+  const [inputUnidades, setInputUnidades] = useState(""); // Quantidade em unidades (Corte/Solda)
+  const inputUnidadesRef = useRef<HTMLInputElement>(null);
   const [inputTaraCustom, setInputTaraCustom] = useState("");
   const [useCustomTara, setUseCustomTara] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -618,13 +620,20 @@ export function PaleteRomaneioModal({
       setDataPalete(initialPalete.data);
       setTurno(initialPalete.turno || "1º Turno (06h - 14h)");
       setOperador(initialPalete.operador || operators[0] || "");
-      setAuxiliar(initialPalete.auxiliar || "");
+      // Localiza com precisão a OP vinculada a este palete (ou reconstrói a partir dos dados do próprio palete)
+      const foundOrder = findOrderForPalete(orders, initialPalete);
+      setSelectedOrder(foundOrder);
+
       if (initialPalete.medidas) {
         setMedidasBobina(initialPalete.medidas);
       } else {
-        setMedidasBobina(extractMedidasFromOrder(findOrderForPalete(orders, initialPalete)));
+        setMedidasBobina(extractMedidasFromOrder(foundOrder));
       }
-      setTaraPadrao(initialPalete.taraPadraoTubete || 1.6);
+      // Sincroniza a máquina vinculada ao palete
+      const machResolved = resolveMachine(machine, initialPalete, foundOrder, machines);
+      setSelectedMachine(machResolved);
+      const isCorte = Boolean((machResolved.setor || "").toUpperCase().includes("CORTE") || (machResolved.setor || "").toUpperCase().includes("SOLDA"));
+      setTaraPadrao(initialPalete.taraPadraoTubete !== undefined ? initialPalete.taraPadraoTubete : (isCorte ? 0 : 1.6));
       setStatus(initialPalete.status || "ABERTO");
       setObservacoes(initialPalete.observacoes || "");
 
@@ -641,13 +650,6 @@ export function PaleteRomaneioModal({
       } catch {}
       setItens(loadedItens);
 
-      // Localiza com precisão a OP vinculada a este palete (ou reconstrói a partir dos dados do próprio palete)
-      const foundOrder = findOrderForPalete(orders, initialPalete);
-      setSelectedOrder(foundOrder);
-
-      // Sincroniza a máquina vinculada ao palete
-      const machResolved = resolveMachine(machine, initialPalete, foundOrder, machines);
-      setSelectedMachine(machResolved);
       if (initialPalete.setorDestino) {
         setSetorDestino(getFullSectorDestinoName(initialPalete.setorDestino));
       } else if ((machResolved.setor || "").toUpperCase().includes("EXTRUS")) {
@@ -674,13 +676,14 @@ export function PaleteRomaneioModal({
       setOperador(operators[0] || "");
       setAuxiliar("");
       setMedidasBobina(extractMedidasFromOrder(activeOrder));
-      setTaraPadrao(1.6);
+      const machResolved = resolveMachine(machine, null, activeOrder, machines);
+      setSelectedMachine(machResolved);
+      const isCorte = Boolean((machResolved.setor || "").toUpperCase().includes("CORTE") || (machResolved.setor || "").toUpperCase().includes("SOLDA"));
+      setTaraPadrao(isCorte ? 0 : 1.6);
       setStatus("ABERTO");
       setObservacoes("");
       setItens([]);
       setSelectedOrder(activeOrder || null);
-      const machResolved = resolveMachine(machine, null, activeOrder, machines);
-      setSelectedMachine(machResolved);
       if ((machResolved.setor || "").toUpperCase().includes("EXTRUS")) {
         setSetorDestino("IMPRESSÃO");
       } else {
@@ -689,6 +692,7 @@ export function PaleteRomaneioModal({
     }
 
     setInputBruto("");
+    setInputUnidades("");
     setErrorMsg("");
     setSuccessToast("");
 
@@ -710,6 +714,10 @@ export function PaleteRomaneioModal({
   );
   const pesoLiquidoTotal = useMemo(
     () => itens.reduce((sum, item) => sum + (Number(item.pesoLiquido) || 0), 0),
+    [itens]
+  );
+  const totalUnidades = useMemo(
+    () => itens.reduce((sum, item) => sum + (Number(item.quantidadeUnidades) || 0), 0),
     [itens]
   );
 
@@ -740,6 +748,7 @@ export function PaleteRomaneioModal({
     const calcBruto = itemsToUse.reduce((sum, item) => sum + (Number(item.pesoBruto) || 0), 0);
     const calcTara = itemsToUse.reduce((sum, item) => sum + (Number(item.tara) || 0), 0);
     const calcLiquido = itemsToUse.reduce((sum, item) => sum + (Number(item.pesoLiquido) || 0), 0);
+    const calcUnidades = itemsToUse.reduce((sum, item) => sum + (Number(item.quantidadeUnidades) || 0), 0);
 
     const id = paleteId || initialPalete?.id || `palete-${Date.now()}`;
     const op = selectedOrder;
@@ -754,7 +763,7 @@ export function PaleteRomaneioModal({
       descricaoItem: op?.descricaoItem || initialPalete?.descricaoItem || (isExtrusao ? "BOBINA SEMI-ACABADA" : "PRODUTO ACABADO"),
       maquinaId: selectedMachine.id,
       maquinaNome: selectedMachine.name,
-      setor: selectedMachine.setor || (isExtrusao ? "EXTRUSÃO" : "REBOBINADEIRA"),
+      setor: selectedMachine.setor || (isExtrusao ? "EXTRUSÃO" : isCorteSolda ? "CORTE" : "REBOBINADEIRA"),
       setorDestino: isExtrusao ? (setorDestino || "IMPRESSÃO") : (initialPalete?.setorDestino || undefined),
       medidas: isExtrusao ? (medidasBobina.trim() || undefined) : undefined,
       data: dataPalete,
@@ -767,6 +776,7 @@ export function PaleteRomaneioModal({
       pesoBrutoTotal: Math.round(calcBruto * 100) / 100,
       taraTotal: Math.round(calcTara * 100) / 100,
       pesoLiquidoTotal: Math.round(calcLiquido * 100) / 100,
+      totalUnidades: isCorteSolda ? calcUnidades : undefined,
       status: statusToUse,
       bobinaMaeOrigem: activeMotherBobina?.numero_bobina || initialPalete?.bobinaMaeOrigem,
       observacoes: observacoes.trim() || undefined,
@@ -844,16 +854,29 @@ export function PaleteRomaneioModal({
   const handleAddBobina = async () => {
     const bruto = parseFloat(inputBruto.replace(",", "."));
     if (isNaN(bruto) || bruto <= 0) {
-      setErrorMsg("Informe um peso bruto válido para a bobina (kg).");
+      setErrorMsg(isCorteSolda ? "Informe o peso do volume/embalagem (kg)." : "Informe um peso bruto válido para a bobina (kg).");
       inputBrutoRef.current?.focus();
       return;
     }
 
-    const tara = useCustomTara
-      ? parseFloat(inputTaraCustom.replace(",", ".")) || 0
-      : taraPadrao;
+    let parsedUnidades: number | undefined = undefined;
+    if (isCorteSolda) {
+      const u = parseInt(inputUnidades.replace(/\D/g, ""), 10);
+      if (isNaN(u) || u <= 0) {
+        setErrorMsg("Informe a quantidade em unidades deste volume/embalagem.");
+        inputUnidadesRef.current?.focus();
+        return;
+      }
+      parsedUnidades = u;
+    }
 
-    const liquido = Math.round((bruto - tara) * 100) / 100;
+    const tara = isCorteSolda
+      ? 0
+      : (useCustomTara
+          ? parseFloat(inputTaraCustom.replace(",", ".")) || 0
+          : taraPadrao);
+
+    const liquido = isCorteSolda ? Math.round(bruto * 100) / 100 : Math.round((bruto - tara) * 100) / 100;
     if (liquido <= 0) {
       setErrorMsg("O peso bruto deve ser superior à tara do tubete.");
       return;
@@ -865,7 +888,9 @@ export function PaleteRomaneioModal({
       minute: "2-digit",
     });
 
-    const codBobina = `BOB-${nextPos.toString().padStart(2, "0")}`;
+    const codBobina = isCorteSolda
+      ? `VOL-${nextPos.toString().padStart(2, "0")}`
+      : `BOB-${nextPos.toString().padStart(2, "0")}`;
 
     // Se for Extrusão, cria o saldo intermediário em estoque_semiacabados (WIP)
     let createdWipId: string | undefined = undefined;
@@ -921,6 +946,7 @@ export function PaleteRomaneioModal({
       tara: Math.round(tara * 100) / 100,
       pesoLiquido: liquido,
       codigoBobina: codBobina,
+      quantidadeUnidades: parsedUnidades,
       horario: nowTime,
       wipId: createdWipId,
     };
@@ -928,6 +954,7 @@ export function PaleteRomaneioModal({
     const updatedItens = [...itens, newItem];
     setItens(updatedItens);
     setInputBruto("");
+    if (isCorteSolda) setInputUnidades("");
     if (useCustomTara) setInputTaraCustom("");
     setErrorMsg("");
 
@@ -935,9 +962,11 @@ export function PaleteRomaneioModal({
     const paleteToSave = buildPaleteObject(updatedItens, "ABERTO");
     persistPalete(
       paleteToSave,
-      isExtrusao
-        ? `Bobina Extrusão #${nextPos} adicionada: ${liquido.toFixed(1)} kg líq. • Saldo WIP (${setorDestino || 'IMPRESSÃO'}) gerado!`
-        : `Bobina #${nextPos} adicionada: ${liquido.toFixed(1)} kg líquido (Salvo automaticamente)`
+      isCorteSolda
+        ? `Volume #${nextPos} adicionado: ${liquido.toFixed(1)} kg • ${parsedUnidades?.toLocaleString("pt-BR")} un (Salvo automaticamente)`
+        : (isExtrusao
+            ? `Bobina Extrusão #${nextPos} adicionada: ${liquido.toFixed(1)} kg líq. • Saldo WIP (${setorDestino || 'IMPRESSÃO'}) gerado!`
+            : `Bobina #${nextPos} adicionada: ${liquido.toFixed(1)} kg líquido (Salvo automaticamente)`)
     );
 
     // Impressão ou geração automática de arquivo na Zebra se a opção estiver ligada pelo operador
@@ -949,6 +978,7 @@ export function PaleteRomaneioModal({
           pesoBruto: newItem.pesoBruto,
           tara: newItem.tara,
           pesoLiquido: newItem.pesoLiquido,
+          quantidadeUnidades: newItem.quantidadeUnidades,
           horario: newItem.horario,
         };
         const cfg = inferEtiquetaZebraData(selectedOrder, paleteToSave);
@@ -958,7 +988,7 @@ export function PaleteRomaneioModal({
       }
     }
 
-    // Keep focus for rapid continuous conveyor weighing
+    // Keep focus for rapid continuous weighing
     setTimeout(() => {
       inputBrutoRef.current?.focus();
     }, 50);
@@ -967,8 +997,37 @@ export function PaleteRomaneioModal({
   const handleKeyDownInput = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") {
       e.preventDefault();
+      if (isCorteSolda) {
+        inputUnidadesRef.current?.focus();
+        inputUnidadesRef.current?.select();
+      } else {
+        handleAddBobina();
+      }
+    }
+  };
+
+  const handleKeyDownUnidades = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
       handleAddBobina();
     }
+  };
+
+  const handleUpdateItemUnits = (posicao: number, novoUnidadesStr: string) => {
+    const parsed = parseInt(novoUnidadesStr.replace(/\D/g, ""), 10);
+    if (isNaN(parsed) || parsed < 0) return;
+
+    const updatedItens = itens.map((item) => {
+      if (item.posicao !== posicao) return item;
+      return {
+        ...item,
+        quantidadeUnidades: parsed,
+      };
+    });
+
+    setItens(updatedItens);
+    const paleteToSave = buildPaleteObject(updatedItens, "ABERTO");
+    persistPalete(paleteToSave);
   };
 
   const handleRemoveItem = (posicao: number) => {
@@ -1614,20 +1673,35 @@ export function PaleteRomaneioModal({
                   <label className="text-[11px] font-bold text-slate-700 uppercase tracking-wide block mb-1">
                     Tara Tubete (kg)
                   </label>
-                  <div className="relative">
-                    <input
-                      type="number"
-                      step="0.1"
-                      min="0"
-                      value={taraPadrao}
-                      onChange={(e) => setTaraPadrao(parseFloat(e.target.value) || 0)}
-                      className="w-full bg-white border border-slate-300 rounded-md px-2.5 py-1.5 text-xs font-bold text-slate-900 focus:ring-2 focus:ring-blue-500"
-                      title="Peso do tubete/carretel que será subtraído de cada bobina"
-                    />
-                    <span className="absolute right-2.5 top-1.5 text-[10px] font-bold text-slate-400">
-                      kg
-                    </span>
-                  </div>
+                  {isCorteSolda ? (
+                    <div className="relative">
+                      <input
+                        type="text"
+                        disabled
+                        value="0,0 (Sem tubete)"
+                        className="w-full bg-slate-100 border border-slate-200 rounded-md px-2.5 py-1.5 text-xs font-bold text-slate-500 cursor-not-allowed"
+                        title="No setor de Corte e Solda não há tubete de papelão (Tara = 0)"
+                      />
+                      <span className="absolute right-2.5 top-1.5 text-[10px] font-bold text-slate-400">
+                        kg
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="relative">
+                      <input
+                        type="number"
+                        step="0.1"
+                        min="0"
+                        value={taraPadrao}
+                        onChange={(e) => setTaraPadrao(parseFloat(e.target.value) || 0)}
+                        className="w-full bg-white border border-slate-300 rounded-md px-2.5 py-1.5 text-xs font-bold text-slate-900 focus:ring-2 focus:ring-blue-500"
+                        title="Peso do tubete/carretel que será subtraído de cada bobina"
+                      />
+                      <span className="absolute right-2.5 top-1.5 text-[10px] font-bold text-slate-400">
+                        kg
+                      </span>
+                    </div>
+                  )}
                 </div>
 
                 {/* MÁQUINA */}
@@ -1644,6 +1718,10 @@ export function PaleteRomaneioModal({
                         setor: isExtrusao ? "EXTRUSÃO" : "REBOBINADEIRA",
                       };
                       setSelectedMachine(found);
+                      const sec = (found.setor || found.name || "").toUpperCase();
+                      if (sec.includes("CORTE") || sec.includes("SOLDA")) {
+                        setTaraPadrao(0);
+                      }
                     }}
                     className="w-full bg-white border border-slate-300 rounded-md px-2.5 py-1.5 text-xs font-semibold text-slate-900 focus:ring-2 focus:ring-blue-500"
                   >
@@ -1752,19 +1830,21 @@ export function PaleteRomaneioModal({
                   <div className="flex items-center gap-2">
                     <Scale className="w-5 h-5 text-amber-400" />
                     <h3 className="text-sm font-bold uppercase tracking-wider text-white">
-                      Estação de Pesagem Rápida · Bobina #{itens.length + 1}
+                      Estação de Pesagem Rápida · {isCorteSolda ? "Volume / Fardo" : "Bobina"} #{itens.length + 1}
                     </h3>
                   </div>
                   <span className="text-[11px] text-blue-200">
-                    Dica: Digite o peso bruto e aperte <strong>ENTER</strong> para lançar e auto-salvar
+                    {isCorteSolda
+                      ? "Dica: Digite o peso bruto, a quantidade (UND) e aperte ENTER para lançar"
+                      : <>Dica: Digite o peso bruto e aperte <strong>ENTER</strong> para lançar e auto-salvar</>}
                   </span>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-end">
                   {/* INPUT PESO BRUTO */}
-                  <div className="sm:col-span-5">
+                  <div className={isCorteSolda ? "sm:col-span-5" : "sm:col-span-5"}>
                     <label className="text-xs font-bold text-blue-200 uppercase tracking-wider block mb-1.5">
-                      Peso Bruto na Balança (kg)
+                      {isCorteSolda ? "Peso na Balança (kg)" : "Peso Bruto na Balança (kg)"}
                     </label>
                     <div className="relative">
                       <input
@@ -1783,27 +1863,52 @@ export function PaleteRomaneioModal({
                     </div>
                   </div>
 
-                  {/* PREVISÃO DE LÍQUIDO */}
-                  <div className="sm:col-span-4 bg-white/10 backdrop-blur-md rounded-xl p-3 border border-white/15 h-13 flex flex-col justify-center">
-                    <div className="flex items-center justify-between text-[11px] text-blue-200">
-                      <span>Tara Tubete: <strong>{currentProspectiveTara.toFixed(1)} kg</strong></span>
-                      <button
-                        type="button"
-                        onClick={() => setUseCustomTara(!useCustomTara)}
-                        className="text-[10px] text-amber-300 hover:underline cursor-pointer"
-                      >
-                        {useCustomTara ? "Usar padrão" : "Ajustar tara"}
-                      </button>
+                  {/* SE FOR CORTE E SOLDA: INPUT QUANTIDADE (UND) */}
+                  {isCorteSolda ? (
+                    <div className="sm:col-span-4">
+                      <label className="text-xs font-bold text-amber-300 uppercase tracking-wider block mb-1.5 flex items-center justify-between">
+                        <span>Quantidade (UND)</span>
+                        <span className="text-[10px] text-blue-200 font-normal">Sacos / Pacotes</span>
+                      </label>
+                      <div className="relative">
+                        <input
+                          ref={inputUnidadesRef}
+                          type="text"
+                          inputMode="numeric"
+                          value={inputUnidades}
+                          onChange={(e) => setInputUnidades(e.target.value)}
+                          onKeyDown={handleKeyDownUnidades}
+                          placeholder="Ex: 1000"
+                          className="w-full h-13 bg-white text-slate-950 font-black text-2xl px-4 rounded-xl shadow-inner border-2 border-transparent focus:border-amber-400 focus:ring-0 outline-none"
+                        />
+                        <span className="absolute right-4 top-3.5 text-xs font-black text-amber-600 bg-amber-100 px-2 py-0.5 rounded">
+                          UND
+                        </span>
+                      </div>
                     </div>
-                    <div className="flex items-baseline gap-2 mt-0.5">
-                      <span className="text-[10px] font-semibold text-slate-300 uppercase">Líquido:</span>
-                      <span className="text-lg font-black text-emerald-400">
-                        {currentProspectiveLiquido > 0
-                          ? `${currentProspectiveLiquido.toFixed(1)} kg`
-                          : "— kg"}
-                      </span>
+                  ) : (
+                    /* PREVISÃO DE LÍQUIDO (EXTRUSÃO / REBOBINADEIRA) */
+                    <div className="sm:col-span-4 bg-white/10 backdrop-blur-md rounded-xl p-3 border border-white/15 h-13 flex flex-col justify-center">
+                      <div className="flex items-center justify-between text-[11px] text-blue-200">
+                        <span>Tara Tubete: <strong>{currentProspectiveTara.toFixed(1)} kg</strong></span>
+                        <button
+                          type="button"
+                          onClick={() => setUseCustomTara(!useCustomTara)}
+                          className="text-[10px] text-amber-300 hover:underline cursor-pointer"
+                        >
+                          {useCustomTara ? "Usar padrão" : "Ajustar tara"}
+                        </button>
+                      </div>
+                      <div className="flex items-baseline gap-2 mt-0.5">
+                        <span className="text-[10px] font-semibold text-slate-300 uppercase">Líquido:</span>
+                        <span className="text-lg font-black text-emerald-400">
+                          {currentProspectiveLiquido > 0
+                            ? `${currentProspectiveLiquido.toFixed(1)} kg`
+                            : "— kg"}
+                        </span>
+                      </div>
                     </div>
-                  </div>
+                  )}
 
                   {/* BOTÃO ADICIONAR */}
                   <div className="sm:col-span-3">
@@ -1813,13 +1918,13 @@ export function PaleteRomaneioModal({
                       className="w-full h-13 bg-amber-500 hover:bg-amber-400 active:scale-95 text-slate-950 font-bold rounded-xl flex items-center justify-center gap-2 shadow-md transition cursor-pointer text-sm"
                     >
                       <Plus className="w-5 h-5 stroke-[2.5]" />
-                      <span>+ Pesar Bobina</span>
+                      <span>{isCorteSolda ? "+ Pesar e Lançar" : "+ Pesar Bobina"}</span>
                     </button>
                   </div>
                 </div>
 
-                {/* TARA CUSTOMIZADA SE ATIVA */}
-                {useCustomTara && (
+                {/* TARA CUSTOMIZADA SE ATIVA (APENAS EXTRUSÃO / REBOBINADEIRA) */}
+                {!isCorteSolda && useCustomTara && (
                   <div className="mt-3 pt-3 border-t border-white/10 flex items-center gap-3">
                     <span className="text-xs text-amber-300 font-semibold">
                       Tara avulsa para esta bobina:
@@ -2158,7 +2263,7 @@ export function PaleteRomaneioModal({
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs">
                   <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1">
-                    Total de Bobinas
+                    {isCorteSolda ? "Total de Volumes" : "Total de Bobinas"}
                   </span>
                   <div className="flex items-baseline gap-1.5">
                     <strong className="text-2xl font-black text-slate-900">
@@ -2170,7 +2275,7 @@ export function PaleteRomaneioModal({
 
                 <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs">
                   <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1">
-                    Peso Bruto Total
+                    {isCorteSolda ? "Peso na Balança" : "Peso Bruto Total"}
                   </span>
                   <div className="flex items-baseline gap-1.5">
                     <strong className="text-2xl font-black text-slate-800">
@@ -2183,20 +2288,34 @@ export function PaleteRomaneioModal({
                   </div>
                 </div>
 
-                <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs">
-                  <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1">
-                    Tara Total (Tubetes)
-                  </span>
-                  <div className="flex items-baseline gap-1.5">
-                    <strong className="text-2xl font-black text-slate-700">
-                      {taraTotal.toLocaleString("pt-BR", {
-                        minimumFractionDigits: 1,
-                        maximumFractionDigits: 1,
-                      })}
-                    </strong>
-                    <span className="text-xs text-slate-500 font-semibold">kg</span>
+                {isCorteSolda ? (
+                  <div className="bg-blue-50 border border-blue-200 p-3.5 rounded-xl shadow-2xs">
+                    <span className="text-[10px] font-bold text-blue-800 uppercase tracking-wider block mb-1">
+                      Total de Unidades
+                    </span>
+                    <div className="flex items-baseline gap-1.5">
+                      <strong className="text-2xl font-black text-blue-900">
+                        {totalUnidades.toLocaleString("pt-BR")}
+                      </strong>
+                      <span className="text-xs text-blue-600 font-bold">un</span>
+                    </div>
                   </div>
-                </div>
+                ) : (
+                  <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1">
+                      Tara Total (Tubetes)
+                    </span>
+                    <div className="flex items-baseline gap-1.5">
+                      <strong className="text-2xl font-black text-slate-700">
+                        {taraTotal.toLocaleString("pt-BR", {
+                          minimumFractionDigits: 1,
+                          maximumFractionDigits: 1,
+                        })}
+                      </strong>
+                      <span className="text-xs text-slate-500 font-semibold">kg</span>
+                    </div>
+                  </div>
+                )}
 
                 <div className="bg-emerald-50 border border-emerald-200 p-3.5 rounded-xl shadow-2xs">
                   <span className="text-[10px] font-bold text-emerald-800 uppercase tracking-wider block mb-1">
@@ -2220,11 +2339,12 @@ export function PaleteRomaneioModal({
                 <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
                     <span className="text-xs font-bold text-slate-800 uppercase">
-                      Bobinas Apontadas no Palete ({itens.length})
+                      {isCorteSolda ? "Volumes Apontados no Palete" : "Bobinas Apontadas no Palete"} ({itens.length})
                     </span>
                     {itens.length > 0 && (
                       <span className="text-[11px] text-slate-500 font-medium">
-                        · Média: {(pesoLiquidoTotal / itens.length).toFixed(1)} kg/bobina
+                        · Média: {(pesoLiquidoTotal / itens.length).toFixed(1)} kg/{isCorteSolda ? "vol" : "bobina"}
+                        {isCorteSolda && totalUnidades > 0 && ` · Total: ${totalUnidades.toLocaleString("pt-BR")} un`}
                       </span>
                     )}
                   </div>
@@ -2273,10 +2393,12 @@ export function PaleteRomaneioModal({
                   <div className="py-12 text-center text-slate-400 space-y-2">
                     <Scale className="w-8 h-8 mx-auto text-slate-300 stroke-[1.5]" />
                     <p className="text-xs font-semibold text-slate-600">
-                      Nenhuma bobina pesada neste palete ainda
+                      {isCorteSolda ? "Nenhum volume pesado neste palete ainda" : "Nenhuma bobina pesada neste palete ainda"}
                     </p>
                     <p className="text-[11px] text-slate-400">
-                      Pese a primeira bobina na balança e digite o peso bruto no campo acima
+                      {isCorteSolda
+                        ? "Pese o primeiro volume na balança, informe o peso e as unidades no campo acima"
+                        : "Pese a primeira bobina na balança e digite o peso bruto no campo acima"}
                     </p>
                   </div>
                 ) : viewMode === "romaneio-grid" ? (
@@ -2287,9 +2409,18 @@ export function PaleteRomaneioModal({
                       <table className="w-full text-left text-xs">
                         <thead className="bg-slate-100 text-slate-700 font-bold text-[10px] uppercase border-b border-slate-200">
                           <tr>
-                            <th className="py-1.5 px-2.5 w-16 text-center">QUANTIDADE</th>
-                            <th className="py-1.5 px-2.5 text-right">PESO BRUTO</th>
-                            <th className="py-1.5 px-2.5 text-right">PESO LÍQUIDO</th>
+                            <th className="py-1.5 px-2.5 w-16 text-center">{isCorteSolda ? "VOLUME" : "QUANTIDADE"}</th>
+                            {isCorteSolda ? (
+                              <>
+                                <th className="py-1.5 px-2.5 text-right">PESO LÍQUIDO</th>
+                                <th className="py-1.5 px-2.5 text-right">UNIDADE</th>
+                              </>
+                            ) : (
+                              <>
+                                <th className="py-1.5 px-2.5 text-right">PESO BRUTO</th>
+                                <th className="py-1.5 px-2.5 text-right">PESO LÍQUIDO</th>
+                              </>
+                            )}
                             <th className="py-1.5 px-1.5 w-14 text-center">AÇÃO</th>
                           </tr>
                         </thead>
@@ -2305,12 +2436,27 @@ export function PaleteRomaneioModal({
                                 <td className="py-1 px-2.5 text-center font-bold text-slate-500">
                                   {pos}
                                 </td>
-                                <td className="py-1 px-2.5 text-right font-semibold text-slate-800">
-                                  {item ? item.pesoBruto.toFixed(1) : "—"}
-                                </td>
-                                <td className="py-1 px-2.5 text-right font-bold text-blue-700">
-                                  {item ? item.pesoLiquido.toFixed(1) : "—"}
-                                </td>
+                                {isCorteSolda ? (
+                                  <>
+                                    <td className="py-1 px-2.5 text-right font-bold text-slate-800">
+                                      {item ? item.pesoLiquido.toFixed(1) : "—"}
+                                    </td>
+                                    <td className="py-1 px-2.5 text-right font-bold text-blue-700">
+                                      {item && item.quantidadeUnidades != null
+                                        ? item.quantidadeUnidades.toLocaleString("pt-BR")
+                                        : "—"}
+                                    </td>
+                                  </>
+                                ) : (
+                                  <>
+                                    <td className="py-1 px-2.5 text-right font-semibold text-slate-800">
+                                      {item ? item.pesoBruto.toFixed(1) : "—"}
+                                    </td>
+                                    <td className="py-1 px-2.5 text-right font-bold text-blue-700">
+                                      {item ? item.pesoLiquido.toFixed(1) : "—"}
+                                    </td>
+                                  </>
+                                )}
                                 <td className="py-1 px-1 text-center">
                                   {item && (
                                     <div className="flex items-center justify-center gap-1">
@@ -2324,11 +2470,12 @@ export function PaleteRomaneioModal({
                                             pesoLiquido: item.pesoLiquido,
                                             codigoBobina: item.codigoBobina,
                                             horario: item.horario,
+                                            quantidadeUnidades: item.quantidadeUnidades,
                                           });
                                           setZebraModalOpen(true);
                                         }}
                                         className="text-slate-400 hover:text-blue-600 transition"
-                                        title={`Imprimir etiqueta Zebra da bobina #${pos}`}
+                                        title={`Imprimir etiqueta Zebra do volume #${pos}`}
                                       >
                                         <Printer className="w-3.5 h-3.5" />
                                       </button>
@@ -2336,7 +2483,7 @@ export function PaleteRomaneioModal({
                                         type="button"
                                         onClick={() => handleRemoveItem(item.posicao)}
                                         className="text-slate-400 hover:text-rose-600 transition"
-                                        title="Remover bobina"
+                                        title="Remover volume"
                                       >
                                         <X className="w-3.5 h-3.5" />
                                       </button>
@@ -2355,9 +2502,18 @@ export function PaleteRomaneioModal({
                       <table className="w-full text-left text-xs">
                         <thead className="bg-slate-100 text-slate-700 font-bold text-[10px] uppercase border-b border-slate-200">
                           <tr>
-                            <th className="py-1.5 px-2.5 w-16 text-center">QUANTIDADE</th>
-                            <th className="py-1.5 px-2.5 text-right">PESO BRUTO</th>
-                            <th className="py-1.5 px-2.5 text-right">PESO LÍQUIDO</th>
+                            <th className="py-1.5 px-2.5 w-16 text-center">{isCorteSolda ? "VOLUME" : "QUANTIDADE"}</th>
+                            {isCorteSolda ? (
+                              <>
+                                <th className="py-1.5 px-2.5 text-right">PESO LÍQUIDO</th>
+                                <th className="py-1.5 px-2.5 text-right">UNIDADE</th>
+                              </>
+                            ) : (
+                              <>
+                                <th className="py-1.5 px-2.5 text-right">PESO BRUTO</th>
+                                <th className="py-1.5 px-2.5 text-right">PESO LÍQUIDO</th>
+                              </>
+                            )}
                             <th className="py-1.5 px-1.5 w-14 text-center">AÇÃO</th>
                           </tr>
                         </thead>
@@ -2373,12 +2529,27 @@ export function PaleteRomaneioModal({
                                 <td className="py-1 px-2.5 text-center font-bold text-slate-500">
                                   {pos}
                                 </td>
-                                <td className="py-1 px-2.5 text-right font-semibold text-slate-800">
-                                  {item ? item.pesoBruto.toFixed(1) : "—"}
-                                </td>
-                                <td className="py-1 px-2.5 text-right font-bold text-blue-700">
-                                  {item ? item.pesoLiquido.toFixed(1) : "—"}
-                                </td>
+                                {isCorteSolda ? (
+                                  <>
+                                    <td className="py-1 px-2.5 text-right font-bold text-slate-800">
+                                      {item ? item.pesoLiquido.toFixed(1) : "—"}
+                                    </td>
+                                    <td className="py-1 px-2.5 text-right font-bold text-blue-700">
+                                      {item && item.quantidadeUnidades != null
+                                        ? item.quantidadeUnidades.toLocaleString("pt-BR")
+                                        : "—"}
+                                    </td>
+                                  </>
+                                ) : (
+                                  <>
+                                    <td className="py-1 px-2.5 text-right font-semibold text-slate-800">
+                                      {item ? item.pesoBruto.toFixed(1) : "—"}
+                                    </td>
+                                    <td className="py-1 px-2.5 text-right font-bold text-blue-700">
+                                      {item ? item.pesoLiquido.toFixed(1) : "—"}
+                                    </td>
+                                  </>
+                                )}
                                 <td className="py-1 px-1 text-center">
                                   {item && (
                                     <div className="flex items-center justify-center gap-1">
@@ -2392,11 +2563,12 @@ export function PaleteRomaneioModal({
                                             pesoLiquido: item.pesoLiquido,
                                             codigoBobina: item.codigoBobina,
                                             horario: item.horario,
+                                            quantidadeUnidades: item.quantidadeUnidades,
                                           });
                                           setZebraModalOpen(true);
                                         }}
                                         className="text-slate-400 hover:text-blue-600 transition"
-                                        title={`Imprimir etiqueta Zebra da bobina #${pos}`}
+                                        title={`Imprimir etiqueta Zebra do volume #${pos}`}
                                       >
                                         <Printer className="w-3.5 h-3.5" />
                                       </button>
@@ -2404,7 +2576,7 @@ export function PaleteRomaneioModal({
                                         type="button"
                                         onClick={() => handleRemoveItem(item.posicao)}
                                         className="text-slate-400 hover:text-rose-600 transition"
-                                        title="Remover bobina"
+                                        title="Remover volume"
                                       >
                                         <X className="w-3.5 h-3.5" />
                                       </button>
@@ -2427,9 +2599,18 @@ export function PaleteRomaneioModal({
                           <th className="py-2 px-3"># VOL</th>
                           <th className="py-2 px-3">CÓDIGO</th>
                           <th className="py-2 px-3">HORÁRIO</th>
-                          <th className="py-2 px-3 text-right">PESO BRUTO (KG)</th>
-                          <th className="py-2 px-3 text-right">TARA (KG)</th>
-                          <th className="py-2 px-3 text-right">PESO LÍQUIDO (KG)</th>
+                          {isCorteSolda ? (
+                            <>
+                              <th className="py-2 px-3 text-right">PESO (KG)</th>
+                              <th className="py-2 px-3 text-right">UNIDADES (QTD)</th>
+                            </>
+                          ) : (
+                            <>
+                              <th className="py-2 px-3 text-right">PESO BRUTO (KG)</th>
+                              <th className="py-2 px-3 text-right">TARA (KG)</th>
+                              <th className="py-2 px-3 text-right">PESO LÍQUIDO (KG)</th>
+                            </>
+                          )}
                           <th className="py-2 px-3 text-center">AÇÃO</th>
                         </tr>
                       </thead>
@@ -2445,23 +2626,53 @@ export function PaleteRomaneioModal({
                             <td className="py-2 px-3 text-slate-500 font-sans">
                               {item.horario || "—"}
                             </td>
-                            <td className="py-2 px-3 text-right">
-                              <input
-                                type="number"
-                                step="0.1"
-                                value={item.pesoBruto}
-                                onChange={(e) =>
-                                  handleUpdateItemWeight(item.posicao, e.target.value)
-                                }
-                                className="w-20 text-right bg-white border border-slate-200 rounded px-1.5 py-0.5 font-bold text-slate-900"
-                              />
-                            </td>
-                            <td className="py-2 px-3 text-right text-slate-500">
-                              {item.tara.toFixed(1)}
-                            </td>
-                            <td className="py-2 px-3 text-right font-bold text-emerald-600">
-                              {item.pesoLiquido.toFixed(1)}
-                            </td>
+                            {isCorteSolda ? (
+                              <>
+                                <td className="py-2 px-3 text-right">
+                                  <input
+                                    type="number"
+                                    step="0.1"
+                                    value={item.pesoLiquido}
+                                    onChange={(e) =>
+                                      handleUpdateItemWeight(item.posicao, e.target.value)
+                                    }
+                                    className="w-20 text-right bg-white border border-slate-200 rounded px-1.5 py-0.5 font-bold text-slate-900"
+                                  />
+                                </td>
+                                <td className="py-2 px-3 text-right">
+                                  <input
+                                    type="number"
+                                    step="1"
+                                    value={item.quantidadeUnidades ?? ""}
+                                    onChange={(e) =>
+                                      handleUpdateItemUnits(item.posicao, e.target.value)
+                                    }
+                                    placeholder="0"
+                                    className="w-24 text-right bg-white border border-blue-200 rounded px-1.5 py-0.5 font-bold text-blue-700"
+                                  />
+                                </td>
+                              </>
+                            ) : (
+                              <>
+                                <td className="py-2 px-3 text-right">
+                                  <input
+                                    type="number"
+                                    step="0.1"
+                                    value={item.pesoBruto}
+                                    onChange={(e) =>
+                                      handleUpdateItemWeight(item.posicao, e.target.value)
+                                    }
+                                    className="w-20 text-right bg-white border border-slate-200 rounded px-1.5 py-0.5 font-bold text-slate-900"
+                                  />
+                                </td>
+                                <td className="py-2 px-3 text-right text-slate-500">
+                                  {item.tara.toFixed(1)}
+                                </td>
+                                <td className="py-2 px-3 text-right font-bold text-emerald-600">
+                                  {item.pesoLiquido.toFixed(1)}
+                                </td>
+                              </>
+                            )}
                             <td className="py-2 px-3 text-center">
                               <div className="flex items-center justify-center gap-1.5">
                                 <button
@@ -2474,11 +2685,12 @@ export function PaleteRomaneioModal({
                                       pesoLiquido: item.pesoLiquido,
                                       codigoBobina: item.codigoBobina,
                                       horario: item.horario,
+                                      quantidadeUnidades: item.quantidadeUnidades,
                                     });
                                     setZebraModalOpen(true);
                                   }}
                                   className="p-1 text-slate-400 hover:text-blue-600 rounded transition"
-                                  title={`Imprimir etiqueta Zebra da bobina #${item.posicao}`}
+                                  title={`Imprimir etiqueta Zebra do volume #${item.posicao}`}
                                 >
                                   <Printer className="w-3.5 h-3.5" />
                                 </button>
@@ -2486,7 +2698,7 @@ export function PaleteRomaneioModal({
                                   type="button"
                                   onClick={() => handleRemoveItem(item.posicao)}
                                   className="p-1 text-slate-400 hover:text-rose-600 rounded transition"
-                                  title="Remover bobina"
+                                  title="Remover volume"
                                 >
                                   <Trash2 className="w-3.5 h-3.5" />
                                 </button>
@@ -2502,20 +2714,34 @@ export function PaleteRomaneioModal({
                 {/* RODAPÉ DE TOTAIS DA FOLHA */}
                 <div className="bg-slate-50 px-4 py-3 border-t border-slate-200 flex flex-wrap items-center justify-between gap-4 font-mono text-xs">
                   <span className="font-bold text-slate-600">
-                    TOTAL DE BOBINAS: <strong className="text-slate-900">{itens.length}</strong>
+                    {isCorteSolda ? "TOTAL DE VOLUMES:" : "TOTAL DE BOBINAS:"} <strong className="text-slate-900">{itens.length}</strong>
                   </span>
                   <div className="flex items-center gap-6">
-                    <span>
-                      PESO BRUTO:{" "}
-                      <strong className="text-slate-900">{pesoBrutoTotal.toFixed(1)} kg</strong>
-                    </span>
-                    <span>
-                      TARA TOTAL:{" "}
-                      <strong className="text-slate-600">{taraTotal.toFixed(1)} kg</strong>
-                    </span>
-                    <span className="text-sm bg-emerald-100 text-emerald-800 px-3 py-1 rounded-md font-bold">
-                      PESO LÍQUIDO: {pesoLiquidoTotal.toFixed(1)} kg
-                    </span>
+                    {isCorteSolda ? (
+                      <>
+                        <span>
+                          TOTAL UNIDADES:{" "}
+                          <strong className="text-blue-700">{totalUnidades.toLocaleString("pt-BR")} UN</strong>
+                        </span>
+                        <span className="text-sm bg-emerald-100 text-emerald-800 px-3 py-1 rounded-md font-bold">
+                          PESO LÍQUIDO: {pesoLiquidoTotal.toFixed(1)} kg
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <span>
+                          PESO BRUTO:{" "}
+                          <strong className="text-slate-900">{pesoBrutoTotal.toFixed(1)} kg</strong>
+                        </span>
+                        <span>
+                          TARA TOTAL:{" "}
+                          <strong className="text-slate-600">{taraTotal.toFixed(1)} kg</strong>
+                        </span>
+                        <span className="text-sm bg-emerald-100 text-emerald-800 px-3 py-1 rounded-md font-bold">
+                          PESO LÍQUIDO: {pesoLiquidoTotal.toFixed(1)} kg
+                        </span>
+                      </>
+                    )}
                   </div>
                 </div>
               </div>
@@ -2638,6 +2864,7 @@ export function PaleteRomaneioModal({
               tara: it.tara,
               pesoLiquido: it.pesoLiquido,
               horario: it.horario,
+              quantidadeUnidades: it.quantidadeUnidades,
             }))}
           />
         )}
@@ -2662,25 +2889,45 @@ export function printOfficialRomaneio(palete: PaleteRomaneio) {
     return;
   }
 
+  const isCorteSolda =
+    (palete.setor || "").toUpperCase().includes("CORTE") ||
+    (palete.setor || "").toUpperCase().includes("SOLDA");
+
   // Prepara as linhas de 1 a 40 e 41 a 80
-  const col1Rows: { pos: number; bruto: string; liq: string }[] = [];
+  const col1Rows: { pos: number; val1: string; val2: string }[] = [];
   for (let i = 1; i <= 40; i++) {
     const item = palete.itens.find((it) => it.posicao === i);
-    col1Rows.push({
-      pos: i,
-      bruto: item ? item.pesoBruto.toFixed(1).replace(".", ",") : "",
-      liq: item ? item.pesoLiquido.toFixed(1).replace(".", ",") : "",
-    });
+    if (isCorteSolda) {
+      col1Rows.push({
+        pos: i,
+        val1: item ? item.pesoLiquido.toFixed(1).replace(".", ",") : "",
+        val2: item && item.quantidadeUnidades != null ? item.quantidadeUnidades.toLocaleString("pt-BR") : "",
+      });
+    } else {
+      col1Rows.push({
+        pos: i,
+        val1: item ? item.pesoBruto.toFixed(1).replace(".", ",") : "",
+        val2: item ? item.pesoLiquido.toFixed(1).replace(".", ",") : "",
+      });
+    }
   }
 
-  const col2Rows: { pos: number; bruto: string; liq: string }[] = [];
+  const col2Rows: { pos: number; val1: string; val2: string }[] = [];
   for (let i = 41; i <= 80; i++) {
     const item = palete.itens.find((it) => it.posicao === i);
-    col2Rows.push({
-      pos: i,
-      bruto: item ? item.pesoBruto.toFixed(1).replace(".", ",") : "",
-      liq: item ? item.pesoLiquido.toFixed(1).replace(".", ",") : "",
-    });
+    if (isCorteSolda) {
+      col2Rows.push({
+        pos: i,
+        val1: item ? item.pesoLiquido.toFixed(1).replace(".", ",") : "",
+        val2: item && item.quantidadeUnidades != null ? item.quantidadeUnidades.toLocaleString("pt-BR") : "",
+      });
+    } else {
+      col2Rows.push({
+        pos: i,
+        val1: item ? item.pesoBruto.toFixed(1).replace(".", ",") : "",
+        val2: item ? item.pesoLiquido.toFixed(1).replace(".", ",") : "",
+      });
+    }
   }
 
   printDoc.open();
@@ -2879,7 +3126,13 @@ export function printOfficialRomaneio(palete: PaleteRomaneio) {
     </div>
 
     <div class="title-bar">
-      ${(palete.setor || '').toUpperCase().includes('EXTRUS') ? 'ROMANEIO DE BOBINAS SEMI-ACABADAS · EXTRUSÃO' : 'ROMANEIO DE PALETE · PRODUTO ACABADO'}
+      ${
+        (palete.setor || "").toUpperCase().includes("EXTRUS")
+          ? "ROMANEIO DE BOBINAS SEMI-ACABADAS · EXTRUSÃO"
+          : isCorteSolda
+          ? "ROMANEIO DE PALETE · CORTE E SOLDA (PRODUTO ACABADO)"
+          : "ROMANEIO DE PALETE · PRODUTO ACABADO"
+      }
     </div>
 
     <div class="info-grid">
@@ -2907,9 +3160,9 @@ export function printOfficialRomaneio(palete: PaleteRomaneio) {
       <table>
         <thead>
           <tr>
-            <th class="col-qty">QUANTIDADE</th>
-            <th class="col-val">PESO BRUTO</th>
-            <th class="col-val">PESO LIQUIDO</th>
+            <th class="col-qty">${isCorteSolda ? "VOLUME" : "QUANTIDADE"}</th>
+            <th class="col-val">${isCorteSolda ? "PESO LIQUIDO" : "PESO BRUTO"}</th>
+            <th class="col-val">${isCorteSolda ? "UNIDADE" : "PESO LIQUIDO"}</th>
           </tr>
         </thead>
         <tbody>
@@ -2917,8 +3170,8 @@ export function printOfficialRomaneio(palete: PaleteRomaneio) {
             .map(
               (r) => `<tr>
             <td class="col-qty">${r.pos}</td>
-            <td class="col-val">${r.bruto}</td>
-            <td class="col-val">${r.liq}</td>
+            <td class="col-val">${r.val1}</td>
+            <td class="col-val">${r.val2}</td>
           </tr>`
             )
             .join("")}
@@ -2929,9 +3182,9 @@ export function printOfficialRomaneio(palete: PaleteRomaneio) {
       <table>
         <thead>
           <tr>
-            <th class="col-qty">QUANTIDADE</th>
-            <th class="col-val">PESO BRUTO</th>
-            <th class="col-val">PESO LIQUIDO</th>
+            <th class="col-qty">${isCorteSolda ? "VOLUME" : "QUANTIDADE"}</th>
+            <th class="col-val">${isCorteSolda ? "PESO LIQUIDO" : "PESO BRUTO"}</th>
+            <th class="col-val">${isCorteSolda ? "UNIDADE" : "PESO LIQUIDO"}</th>
           </tr>
         </thead>
         <tbody>
@@ -2939,8 +3192,8 @@ export function printOfficialRomaneio(palete: PaleteRomaneio) {
             .map(
               (r) => `<tr>
             <td class="col-qty">${r.pos}</td>
-            <td class="col-val">${r.bruto}</td>
-            <td class="col-val">${r.liq}</td>
+            <td class="col-val">${r.val1}</td>
+            <td class="col-val">${r.val2}</td>
           </tr>`
             )
             .join("")}
@@ -2951,14 +3204,14 @@ export function printOfficialRomaneio(palete: PaleteRomaneio) {
     <!-- TOTAIS DO PALETE (IDÊNTICO AO RODAPÉ DA FOLHA) -->
     <div class="totals-box">
       <div class="tot-item">
-        VOLUMES: <strong>${palete.totalVolumes} bobinas</strong>
+        VOLUMES: <strong>${palete.totalVolumes} ${isCorteSolda ? "volumes" : "bobinas"}</strong>
       </div>
-      <div class="tot-item">
-        PESO BRUTO: <strong>${palete.pesoBrutoTotal.toFixed(1).replace(".", ",")} KG</strong>
-      </div>
-      <div class="tot-item">
-        TARA TOTAL (${palete.taraPadraoTubete.toFixed(1).replace(".", ",")} kg/tub): <strong>${palete.taraTotal.toFixed(1).replace(".", ",")} KG</strong>
-      </div>
+      ${
+        isCorteSolda
+          ? `<div class="tot-item">TOTAL UNIDADES: <strong>${(palete.totalUnidades || 0).toLocaleString("pt-BR")} UN</strong></div>`
+          : `<div class="tot-item">PESO BRUTO: <strong>${palete.pesoBrutoTotal.toFixed(1).replace(".", ",")} KG</strong></div>
+             <div class="tot-item">TARA TOTAL (${palete.taraPadraoTubete.toFixed(1).replace(".", ",")} kg/tub): <strong>${palete.taraTotal.toFixed(1).replace(".", ",")} KG</strong></div>`
+      }
       <div class="tot-item-big">
         PESO LÍQUIDO: ${palete.pesoLiquidoTotal.toFixed(1).replace(".", ",")} KG
       </div>
