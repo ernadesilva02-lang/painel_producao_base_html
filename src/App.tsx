@@ -51,6 +51,7 @@ import {
   Menu as MenuIcon,
   Database,
   Coins,
+  Download,
 } from "lucide-react";
 
 import { DatabaseMigrationModal } from "./components/DatabaseMigrationModal";
@@ -839,6 +840,18 @@ export default function App() {
             Operação <span>/</span> {active}
           </div>
           <div className="sync">
+            <a
+              href="/arquivos-atualizados-extrusao.zip"
+              download="arquivos-atualizados-extrusao.zip"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-xs transition cursor-pointer"
+              style={{ textDecoration: "none" }}
+              title="Baixar pacote .zip com todas as atualizações recentes de código para produção"
+            >
+              <Download size={14} />
+              <span>Baixar Atualização (.ZIP)</span>
+            </a>
             <button className="secondary" onClick={refresh} disabled={loading}>
               <RotateCw size={13} className={loading ? "spin" : ""} style={{ marginRight: 6 }} />
               {loading ? "Sincronizando" : "Atualizar dados"}
