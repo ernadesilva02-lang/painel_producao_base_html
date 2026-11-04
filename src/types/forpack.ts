@@ -91,6 +91,8 @@ export type Production = {
   cliente?: string;
   descricaoItem?: string;
   material?: string;
+  bobinasWipConsumidas?: string[];
+  bobinaWipOrigem?: string;
   _key?: string;
   _updatedAt?: string;
 };
@@ -184,6 +186,8 @@ export type BobinaSemiAcabada = {
 export type TipoMovimentoEstoque =
   | "ENTRADA_COMPRA"
   | "CONSUMO_OP"
+  | "CONSUMO_PRODUCAO"
+  | "CONSUMO_WIP"
   | "TRANSFERENCIA_WIP"
   | "AJUSTE_INVENTARIO"
   | "RETORNO_APARA";
@@ -248,6 +252,7 @@ export type ItemPaleteRomaneio = {
   pesoLiquido: number;      // ex: 47.7
   codigoBobina?: string;    // ex: BOB-01
   horario?: string;
+  wipId?: string;           // ID do saldo intermediário em estoque_semiacabados (WIP)
 };
 
 export type PaleteRomaneio = {
@@ -260,7 +265,9 @@ export type PaleteRomaneio = {
   descricaoItem: string;
   maquinaId: string;
   maquinaNome?: string;
-  setor: Sector | string;    // ex: "REBOBINADEIRA"
+  setor: Sector | string;    // ex: "REBOBINADEIRA" ou "EXTRUSÃO"
+  setorDestino?: string;     // ex: "IMPRESSÃO", "LAMINAÇÃO", "REBOBINADEIRA", "CORTE/SOLDA"
+  medidas?: string;          // ex: "40X0,070" tamanho digitado pelo operador na Extrusão
   data: string;              // YYYY-MM-DD
   turno: string;             // "1º Turno (06h - 14h)", etc.
   operador: string;
@@ -273,6 +280,8 @@ export type PaleteRomaneio = {
   pesoLiquidoTotal: number;  // soma líquido kg
   status: StatusPalete;
   observacoes?: string;
+  bobinaMaeOrigem?: string;
+  bobinasMaeConsumidas?: string[];
   idApontamentoProducao?: string; // id do record de produção gerado no fechamento
   created_at?: string;
   updated_at?: string;
