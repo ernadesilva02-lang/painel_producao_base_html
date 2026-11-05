@@ -261,19 +261,11 @@ export function DailyLaunches({
           ...existingRecord,
           qtdProduzido: String(palete.pesoLiquidoTotal),
           qtdUnidades: palete.totalUnidades ? String(palete.totalUnidades) : existingRecord.qtdUnidades,
-          aparas: palete.perdasAparas?.totalKg ? String(palete.perdasAparas.totalKg) : existingRecord.aparas,
-          perdaRefileKg: palete.perdasAparas?.refileKg,
-          perdaAcertoKg: palete.perdasAparas?.acertoKg,
-          perdaDefeitoKg: palete.perdasAparas?.defeitoKg,
-          perdasAparasTotalKg: palete.perdasAparas?.totalKg,
-          rendimentoPercentual: palete.rendimentoPercentual,
-          totalEntradaWipKg: palete.totalEntradaBobinasMaeKg,
-          bobinasWipConsumidas: palete.bobinasMaeConsumidas,
           dataProducao: palete.data,
           turno: palete.turno,
           operador: palete.operador,
           maquinaId: machine.id,
-          descricaoItem: `${order.descricaoItem} (Palete ${palete.numeroPalete}: ${palete.totalVolumes} ${palete.totalUnidades ? `volumes - ${palete.totalUnidades.toLocaleString("pt-BR")} un` : "bobinas"}${palete.perdasAparas?.totalKg ? ` · Perdas: ${palete.perdasAparas.totalKg.toFixed(1)}kg` : ""})`,
+          descricaoItem: `${order.descricaoItem} (Palete ${palete.numeroPalete}: ${palete.totalVolumes} ${palete.totalUnidades ? `volumes - ${palete.totalUnidades.toLocaleString("pt-BR")} un` : "bobinas"})`,
         });
 
         palete.idApontamentoProducao = existingRecord.id;
@@ -291,19 +283,11 @@ export function DailyLaunches({
       const prodInput: Production = {
         qtdProduzido: String(palete.pesoLiquidoTotal),
         qtdUnidades: palete.totalUnidades ? String(palete.totalUnidades) : undefined,
-        aparas: palete.perdasAparas?.totalKg ? String(palete.perdasAparas.totalKg) : undefined,
-        perdaRefileKg: palete.perdasAparas?.refileKg,
-        perdaAcertoKg: palete.perdasAparas?.acertoKg,
-        perdaDefeitoKg: palete.perdasAparas?.defeitoKg,
-        perdasAparasTotalKg: palete.perdasAparas?.totalKg,
-        rendimentoPercentual: palete.rendimentoPercentual,
-        totalEntradaWipKg: palete.totalEntradaBobinasMaeKg,
-        bobinasWipConsumidas: palete.bobinasMaeConsumidas,
         dataProducao: palete.data,
         turno: palete.turno,
         operador: palete.operador,
         maquinaId: machine.id,
-        descricaoItem: `${order.descricaoItem} (Palete ${palete.numeroPalete}: ${palete.totalVolumes} ${palete.totalUnidades ? `volumes - ${palete.totalUnidades.toLocaleString("pt-BR")} un` : "bobinas"}${palete.perdasAparas?.totalKg ? ` · Perdas: ${palete.perdasAparas.totalKg.toFixed(1)}kg` : ""})`,
+        descricaoItem: `${order.descricaoItem} (Palete ${palete.numeroPalete}: ${palete.totalVolumes} ${palete.totalUnidades ? `volumes - ${palete.totalUnidades.toLocaleString("pt-BR")} un` : "bobinas"})`,
       };
 
       let registeredId: string | undefined;

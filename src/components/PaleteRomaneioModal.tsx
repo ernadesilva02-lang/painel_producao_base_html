@@ -38,8 +38,6 @@ import {
   SECTORS,
   Sector,
   BobinaSemiAcabada,
-  ItemBobinaMaeConsumida,
-  DetalhePerdasAparas,
 } from "../types/forpack";
 import {
   isOrderInProduction,
@@ -339,25 +337,6 @@ export function PaleteRomaneioModal({
   // Items list
   const [itens, setItens] = useState<ItemPaleteRomaneio[]>([]);
 
-  // Derived calculations
-  const totalVolumes = itens.length;
-  const pesoBrutoTotal = useMemo(
-    () => itens.reduce((sum, item) => sum + (Number(item.pesoBruto) || 0), 0),
-    [itens]
-  );
-  const taraTotal = useMemo(
-    () => itens.reduce((sum, item) => sum + (Number(item.tara) || 0), 0),
-    [itens]
-  );
-  const pesoLiquidoTotal = useMemo(
-    () => itens.reduce((sum, item) => sum + (Number(item.pesoLiquido) || 0), 0),
-    [itens]
-  );
-  const totalUnidades = useMemo(
-    () => itens.reduce((sum, item) => sum + (Number(item.quantidadeUnidades) || 0), 0),
-    [itens]
-  );
-
   // Fast weighing & units input station
   const [inputBruto, setInputBruto] = useState("");
   const [inputUnidades, setInputUnidades] = useState(""); // Quantidade em unidades (Corte/Solda)
@@ -475,16 +454,11 @@ export function PaleteRomaneioModal({
 
   // Bobinas Mãe / Semiacabadas (WIP) disponíveis da OP para uso na Rebobinadeira/Acabamento
   const [wipBobinas, setWipBobinas] = useState<BobinaSemiAcabada[]>([]);
-  const [selectedMotherBobinaIds, setSelectedMotherBobinaIds] = useState<string[]>([]);
-  const [wipBaixaTotalMap, setWipBaixaTotalMap] = useState<Record<string, boolean>>({});
+  const [selectedMotherBobinaId, setSelectedMotherBobinaId] = useState<string | null>(null);
   const [wipScanQuery, setWipScanQuery] = useState("");
   const [wipLoading, setWipLoading] = useState(false);
+  const [wipBaixaTotal, setWipBaixaTotal] = useState(false);
   const [wipScope, setWipScope] = useState<"op" | "setor" | "todos">("op");
-
-  // Lançamento Detalhado de Perdas e Aparas (Rebobinadeira, Corte, etc.)
-  const [perdaRefileKg, setPerdaRefileKg] = useState<string>("");
-  const [perdaAcertoKg, setPerdaAcertoKg] = useState<string>("");
-  const [perdaDefeitoKg, setPerdaDefeitoKg] = useState<string>("");
 
   const loadMotherBobinas = async () => {
     if (!isOpen) return;
@@ -513,6 +487,7 @@ export function PaleteRomaneioModal({
     const currentSector = (selectedMachine?.setor || machine?.setor || "").toUpperCase().trim();
 
     // 1. Bobinas vinculadas à OP ativa E com destino para o setor atual da máquina
+    // (Regra: No setor da máquina (ex: Rebobinadeira) da OP (ex: 9820), lista apenas as bobinas daquela OP com destino ao setor selecionado)
     const opSectorList = activeList.filter(
       (b) => isBobinaMatchOrder(b, selectedOrder, numeroPalete) && doesBobinaMatchSector(b.setor_destino, currentSector)
     );
@@ -529,6 +504,7 @@ export function PaleteRomaneioModal({
       base = activeList;
     }
 
+    // Se houver busca por texto digitado / QR code bipado
     if (wipScanQuery.trim()) {
       const q = wipScanQuery.trim().toUpperCase();
       const filtered = base.filter(
@@ -538,6 +514,7 @@ export function PaleteRomaneioModal({
           (b.operador && b.operador.toUpperCase().includes(q))
       );
       if (filtered.length === 0) {
+        // Se não encontrou no escopo selecionado, permite bipar/buscar em todo o pátio ativo
         const anyMatch = activeList.filter(
           (b) =>
             b.numero_bobina.toUpperCase().includes(q) ||
@@ -566,81 +543,25 @@ export function PaleteRomaneioModal({
     };
   }, [wipBobinas, selectedOrder, numeroPalete, selectedMachine, machine, wipScope, wipScanQuery]);
 
-  // Lista de bobinas mãe ativas selecionadas para este lote
-  const selectedMotherBobinas = useMemo(() => {
-    if (selectedMotherBobinaIds.length === 0) return [];
-    return wipBobinas.filter((b) => selectedMotherBobinaIds.includes(b.id));
-  }, [selectedMotherBobinaIds, wipBobinas]);
-
-  // Total de peso de entrada proveniente das bobinas da Extrusão selecionadas
-  const totalEntradaMaeKg = useMemo(() => {
-    return selectedMotherBobinas.reduce((sum, b) => sum + (Number(b.peso_liquido_kg) || 0), 0);
-  }, [selectedMotherBobinas]);
-
-  // Perdas calculadas
-  const parsedRefileKg = parseFloat(perdaRefileKg.replace(",", ".")) || 0;
-  const parsedAcertoKg = parseFloat(perdaAcertoKg.replace(",", ".")) || 0;
-  const parsedDefeitoKg = parseFloat(perdaDefeitoKg.replace(",", ".")) || 0;
-  const totalPerdasKg = Math.round((parsedRefileKg + parsedAcertoKg + parsedDefeitoKg) * 100) / 100;
-
-  // Balanço de massa e rendimento
-  const totalConsumidoKg = Math.round((pesoLiquidoTotal + totalPerdasKg) * 100) / 100;
-  const saldoRestanteGeralKg = Math.max(0, Math.round((totalEntradaMaeKg - totalConsumidoKg) * 100) / 100);
-  const rendimentoPercentual = totalEntradaMaeKg > 0 ? Math.round(((pesoLiquidoTotal / totalEntradaMaeKg) * 100) * 10) / 10 : 0;
-
-  // Toggle de seleção de bobina mãe individual
-  const handleToggleMotherBobina = (bobinaId: string) => {
-    setSelectedMotherBobinaIds((prev) => {
-      const exists = prev.includes(bobinaId);
-      if (exists) {
-        setWipBaixaTotalMap((m) => {
-          const c = { ...m };
-          delete c[bobinaId];
-          return c;
-        });
-        return prev.filter((id) => id !== bobinaId);
-      } else {
-        setWipBaixaTotalMap((m) => ({ ...m, [bobinaId]: true }));
-        return [...prev, bobinaId];
-      }
-    });
-  };
-
-  // Selecionar ou desmarcar todas as bobinas desta OP
-  const handleToggleSelectAllOpBobinas = () => {
-    if (opBobinas.length === 0) return;
-    const allIds = opBobinas.map((b) => b.id);
-    const areAllSelected = allIds.every((id) => selectedMotherBobinaIds.includes(id));
-    if (areAllSelected) {
-      setSelectedMotherBobinaIds((prev) => prev.filter((id) => !allIds.includes(id)));
-      setWipBaixaTotalMap((m) => {
-        const c = { ...m };
-        allIds.forEach((id) => delete c[id]);
-        return c;
-      });
-    } else {
-      setSelectedMotherBobinaIds((prev) => Array.from(new Set([...prev, ...allIds])));
-      setWipBaixaTotalMap((m) => {
-        const c = { ...m };
-        allIds.forEach((id) => { c[id] = true; });
-        return c;
-      });
-      setSuccessToast(`Todas as ${allIds.length} bobinas da OP foram selecionadas!`);
-      setTimeout(() => setSuccessToast(""), 3500);
-    }
-  };
+  // Bobina mãe ativa marcada em uso
+  const activeMotherBobina = useMemo(() => {
+    if (!selectedMotherBobinaId) return null;
+    return wipBobinas.find(b => b.id === selectedMotherBobinaId) || null;
+  }, [selectedMotherBobinaId, wipBobinas]);
 
   // Função para identificar bobina via bipagem de QR Code ou busca
   const handleScanMotherBobina = (query: string) => {
     const q = query.trim().toUpperCase();
     if (!q) return;
 
+    // 1. Tentar nas bobinas do escopo atual
     let match = availableMotherBobinas.find(b =>
       b.numero_bobina.toUpperCase() === q ||
       q.includes(b.numero_bobina.toUpperCase()) ||
       b.numero_bobina.toUpperCase().includes(q)
     );
 
+    // 2. Tentar em todo o pátio ativo
     if (!match) {
       match = allActiveBobinas.find(b =>
         b.numero_bobina.toUpperCase() === q ||
@@ -650,12 +571,9 @@ export function PaleteRomaneioModal({
     }
 
     if (match) {
-      if (!selectedMotherBobinaIds.includes(match.id)) {
-        setSelectedMotherBobinaIds((prev) => [...prev, match!.id]);
-        setWipBaixaTotalMap((m) => ({ ...m, [match!.id]: true }));
-      }
+      setSelectedMotherBobinaId(match.id);
       setWipScanQuery("");
-      setSuccessToast(`Bobina mãe ${match.numero_bobina} (${match.peso_liquido_kg} kg) bipada e vinculada!`);
+      setSuccessToast(`Bobina mãe ${match.numero_bobina} (${match.peso_liquido_kg} kg) identificada e vinculada!`);
       setTimeout(() => setSuccessToast(""), 3500);
     } else {
       setErrorMsg(`Bobina "${query}" não encontrada ou sem saldo disponível no pátio.`);
@@ -665,12 +583,9 @@ export function PaleteRomaneioModal({
 
   const handleSelectOrder = (order: Order) => {
     setSelectedOrder(order);
-    setSelectedMotherBobinaIds([]);
-    setWipBaixaTotalMap({});
-    setPerdaRefileKg("");
-    setPerdaAcertoKg("");
-    setPerdaDefeitoKg("");
+    setSelectedMotherBobinaId(null);
     setWipScanQuery("");
+    setWipBaixaTotal(false);
     setIsOpSearchOpen(false);
     setOpSearchQuery("");
     if (!medidasBobina || medidasBobina === extractMedidasFromOrder(selectedOrder)) {
@@ -735,40 +650,6 @@ export function PaleteRomaneioModal({
       } catch {}
       setItens(loadedItens);
 
-      // Restaura bobinas mãe vinculadas e perdas/aparas
-      if (initialPalete.bobinasMaeConsumidasDetalhe && initialPalete.bobinasMaeConsumidasDetalhe.length > 0) {
-        setSelectedMotherBobinaIds(initialPalete.bobinasMaeConsumidasDetalhe.map((b) => b.id));
-        const bMap: Record<string, boolean> = {};
-        initialPalete.bobinasMaeConsumidasDetalhe.forEach((b) => {
-          bMap[b.id] = b.baixaTotal;
-        });
-        setWipBaixaTotalMap(bMap);
-      } else if (initialPalete.bobinasMaeConsumidas && initialPalete.bobinasMaeConsumidas.length > 0) {
-        setSelectedMotherBobinaIds(initialPalete.bobinasMaeConsumidas);
-        const bMap: Record<string, boolean> = {};
-        initialPalete.bobinasMaeConsumidas.forEach((id) => { bMap[id] = true; });
-        setWipBaixaTotalMap(bMap);
-      } else if (initialPalete.bobinaMaeOrigem) {
-        const found = allActiveBobinas.find(b => b.numero_bobina === initialPalete.bobinaMaeOrigem);
-        if (found) {
-          setSelectedMotherBobinaIds([found.id]);
-          setWipBaixaTotalMap({ [found.id]: true });
-        }
-      } else {
-        setSelectedMotherBobinaIds([]);
-        setWipBaixaTotalMap({});
-      }
-
-      if (initialPalete.perdasAparas) {
-        setPerdaRefileKg(initialPalete.perdasAparas.refileKg > 0 ? String(initialPalete.perdasAparas.refileKg) : "");
-        setPerdaAcertoKg(initialPalete.perdasAparas.acertoKg > 0 ? String(initialPalete.perdasAparas.acertoKg) : "");
-        setPerdaDefeitoKg(initialPalete.perdasAparas.defeitoKg > 0 ? String(initialPalete.perdasAparas.defeitoKg) : "");
-      } else {
-        setPerdaRefileKg("");
-        setPerdaAcertoKg("");
-        setPerdaDefeitoKg("");
-      }
-
       if (initialPalete.setorDestino) {
         setSetorDestino(getFullSectorDestinoName(initialPalete.setorDestino));
       } else if ((machResolved.setor || "").toUpperCase().includes("EXTRUS")) {
@@ -803,11 +684,6 @@ export function PaleteRomaneioModal({
       setObservacoes("");
       setItens([]);
       setSelectedOrder(activeOrder || null);
-      setSelectedMotherBobinaIds([]);
-      setWipBaixaTotalMap({});
-      setPerdaRefileKg("");
-      setPerdaAcertoKg("");
-      setPerdaDefeitoKg("");
       if ((machResolved.setor || "").toUpperCase().includes("EXTRUS")) {
         setSetorDestino("IMPRESSÃO");
       } else {
@@ -826,6 +702,24 @@ export function PaleteRomaneioModal({
     }, 150);
   }, [isOpen, initialPalete?.id]);
 
+  // Derived calculations
+  const totalVolumes = itens.length;
+  const pesoBrutoTotal = useMemo(
+    () => itens.reduce((sum, item) => sum + (Number(item.pesoBruto) || 0), 0),
+    [itens]
+  );
+  const taraTotal = useMemo(
+    () => itens.reduce((sum, item) => sum + (Number(item.tara) || 0), 0),
+    [itens]
+  );
+  const pesoLiquidoTotal = useMemo(
+    () => itens.reduce((sum, item) => sum + (Number(item.pesoLiquido) || 0), 0),
+    [itens]
+  );
+  const totalUnidades = useMemo(
+    () => itens.reduce((sum, item) => sum + (Number(item.quantidadeUnidades) || 0), 0),
+    [itens]
+  );
 
   // Current prospective item calculation for fast input display
   const currentProspectiveBruto = parseFloat(inputBruto.replace(",", ".")) || 0;
@@ -859,28 +753,6 @@ export function PaleteRomaneioModal({
     const id = paleteId || initialPalete?.id || `palete-${Date.now()}`;
     const op = selectedOrder;
 
-    const bobinasDetalhe: ItemBobinaMaeConsumida[] = selectedMotherBobinas.map((b) => ({
-      id: b.id,
-      numeroBobina: b.numero_bobina,
-      numero_bobina: b.numero_bobina,
-      pesoEntradaKg: Number(b.peso_liquido_kg) || 0,
-      pesoOriginalKg: Number(b.peso_liquido_kg) || 0,
-      pesoConsumidoKg: Number(b.peso_liquido_kg) || 0,
-      setorOrigem: b.setor_origem,
-      baixaTotal: Boolean(wipBaixaTotalMap[b.id]),
-    }));
-
-    const perdasAparasObj: DetalhePerdasAparas | undefined =
-      totalPerdasKg > 0 || parsedRefileKg > 0 || parsedAcertoKg > 0 || parsedDefeitoKg > 0
-        ? {
-            refileKg: parsedRefileKg,
-            acertoKg: parsedAcertoKg,
-            defeitoKg: parsedDefeitoKg,
-            totalKg: totalPerdasKg,
-            totalPerdasKg: totalPerdasKg,
-          }
-        : undefined;
-
     return {
       id,
       numeroPalete: numeroPalete.trim() || initialPalete?.numeroPalete || `PAL-${Date.now().toString().slice(-4)}`,
@@ -906,12 +778,7 @@ export function PaleteRomaneioModal({
       pesoLiquidoTotal: Math.round(calcLiquido * 100) / 100,
       totalUnidades: isCorteSolda ? calcUnidades : undefined,
       status: statusToUse,
-      bobinaMaeOrigem: selectedMotherBobinas.map((b) => b.numero_bobina).join(", ") || initialPalete?.bobinaMaeOrigem,
-      bobinasMaeConsumidas: selectedMotherBobinaIds.length > 0 ? selectedMotherBobinaIds : initialPalete?.bobinasMaeConsumidas,
-      bobinasMaeConsumidasDetalhe: bobinasDetalhe.length > 0 ? bobinasDetalhe : initialPalete?.bobinasMaeConsumidasDetalhe,
-      perdasAparas: perdasAparasObj || initialPalete?.perdasAparas,
-      totalEntradaBobinasMaeKg: totalEntradaMaeKg > 0 ? totalEntradaMaeKg : initialPalete?.totalEntradaBobinasMaeKg,
-      rendimentoPercentual: rendimentoPercentual !== null ? rendimentoPercentual : initialPalete?.rendimentoPercentual,
+      bobinaMaeOrigem: activeMotherBobina?.numero_bobina || initialPalete?.bobinaMaeOrigem,
       observacoes: observacoes.trim() || undefined,
       idApontamentoProducao: initialPalete?.idApontamentoProducao,
       created_at: initialPalete?.created_at || new Date().toISOString(),
@@ -1261,26 +1128,25 @@ export function PaleteRomaneioModal({
       const paleteFechado = buildPaleteObject(itens, "FECHADO");
       await onClosePaleteAndRegister(paleteFechado, selectedOrder, machToUse);
 
-      // Consome o saldo das bobinas mãe semiacabadas utilizadas se houver
-      if (selectedMotherBobinas.length > 0) {
-        for (const motherBobina of selectedMotherBobinas) {
-          const pesoOriginal = Number(motherBobina.peso_liquido_kg) || 0;
-          const isBaixaTotal = Boolean(wipBaixaTotalMap[motherBobina.id]) || (selectedMotherBobinas.length === 1 && (saldoRestanteGeralKg <= 0.1));
-          const pesoAConsumir = isBaixaTotal ? pesoOriginal : Math.min(pesoOriginal, pesoLiquidoTotal);
+      // Consome o saldo da bobina mãe semiacabada utilizada se houver
+      if (activeMotherBobina) {
+        const pesoConsumido = itens.reduce((sum, item) => sum + (Number(item.pesoLiquido) || 0), 0);
+        const pesoOriginal = Number(activeMotherBobina.peso_liquido_kg) || 0;
+        const saldoRestante = Math.max(0, pesoOriginal - pesoConsumido);
+        const deveFinalizar = wipBaixaTotal || saldoRestante <= 0.1;
 
-          try {
-            await consumirBobinaWip({
-              bobinaId: motherBobina.id,
-              pesoConsumidoKg: pesoAConsumir > 0 ? pesoAConsumir : pesoOriginal,
-              baixaTotal: isBaixaTotal,
-              opId: selectedOrder.numeroOp || selectedOrder.id,
-              setor: machToUse.setor,
-              maquinaNome: machToUse.name,
-              operador: operador.trim() || "Operador",
-            });
-          } catch (consErr) {
-            console.warn(`Aviso ao consumir bobina mãe ${motherBobina.numero_bobina}:`, consErr);
-          }
+        try {
+          await consumirBobinaWip({
+            bobinaId: activeMotherBobina.id,
+            pesoConsumidoKg: pesoConsumido > 0 ? pesoConsumido : pesoOriginal,
+            baixaTotal: deveFinalizar,
+            opId: selectedOrder.numeroOp || selectedOrder.id,
+            setor: machToUse.setor,
+            maquinaNome: machToUse.name,
+            operador: operador.trim() || "Operador",
+          });
+        } catch (consErr) {
+          console.warn("Aviso ao consumir bobina mãe no fechamento do palete:", consErr);
         }
       }
 
@@ -2112,23 +1978,23 @@ export function PaleteRomaneioModal({
                 </div>
               </div>
 
-              {/* SEÇÃO DE BOBINAS MÃE / ENTRADA SEMIACABADAS (WIP) & BALANÇO DE MASSA */}
+              {/* SEÇÃO DE BOBINAS MÃE / ENTRADA SEMIACABADAS (WIP): Apenas para setores seguintes à extrusão (Impressão, Laminação, Rebobinadeira, Corte) */}
               {!isExtrusao && (
-                <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 space-y-4">
-                  <div className="flex items-center justify-between flex-wrap gap-2">
+                <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 space-y-3.5">
+                  <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <div className="w-7 h-7 rounded-lg bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600">
                         <Layers className="w-4 h-4" />
                       </div>
                       <div>
-                        <h4 className="text-xs font-black uppercase tracking-wider text-slate-800 flex items-center gap-1.5 flex-wrap">
-                          <span>Consumo Bobinas Mãe & Balanço de Massa</span>
+                        <h4 className="text-xs font-black uppercase tracking-wider text-slate-800 flex items-center gap-1.5">
+                          Bobinas Mãe / Semiacabadas (WIP)
                           <span className="text-[10px] font-bold bg-indigo-100 text-indigo-700 px-1.5 py-0.2 rounded font-mono">
-                            {selectedMotherBobinas.length} de {availableMotherBobinas.length} sel.
+                            {availableMotherBobinas.length} disp.
                           </span>
                         </h4>
                         <p className="text-[11px] text-slate-500">
-                          Selecione ou bipe as bobinas de extrusão consumidas para abater o saldo e calcular o rendimento real.
+                          Marque a bobina que está alimentando a máquina para abater o saldo.
                         </p>
                       </div>
                     </div>
@@ -2141,206 +2007,11 @@ export function PaleteRomaneioModal({
                       title="Recarregar saldo de bobinas do pátio"
                     >
                       <RotateCcw className={`w-3 h-3 ${wipLoading ? "animate-spin" : ""}`} />
-                      <span>Atualizar Saldo</span>
+                      <span>Atualizar</span>
                     </button>
                   </div>
 
-                  {/* PAINEL DE BALANÇO DE MASSA COMPARATIVO (Extrusão vs Produção Rebobinadeira vs Perdas) */}
-                  <div className="bg-gradient-to-br from-slate-900 to-indigo-950 text-white rounded-xl p-3.5 space-y-3 shadow-md border border-slate-800">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <BarChart2 className="w-4 h-4 text-amber-400" />
-                        <span className="text-xs font-black tracking-wide uppercase text-slate-100">
-                          Balanço de Massa & Rendimento
-                        </span>
-                      </div>
-                      {rendimentoPercentual !== null && (
-                        <div className="flex items-center gap-1.5 bg-white/10 px-2 py-0.5 rounded-full border border-white/15">
-                          <span className="text-[10px] text-slate-300 font-medium">Rendimento:</span>
-                          <strong className={`text-xs font-mono font-black ${
-                            rendimentoPercentual >= 95 ? "text-emerald-400" : rendimentoPercentual >= 85 ? "text-amber-300" : "text-rose-400"
-                          }`}>
-                            {rendimentoPercentual.toFixed(1)}%
-                          </strong>
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Grade de 4 Métricas */}
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center">
-                      <div className="bg-white/10 rounded-lg p-2 border border-white/10">
-                        <span className="text-[10px] text-amber-300 uppercase block font-semibold">
-                          1. Entrada Extrusão
-                        </span>
-                        <strong className="text-sm font-black font-mono text-white block mt-0.5">
-                          {totalEntradaMaeKg.toFixed(1)} <span className="text-[10px] font-normal text-slate-300">kg</span>
-                        </strong>
-                        <span className="text-[10px] text-slate-300 block font-mono">
-                          {selectedMotherBobinas.length} bobina(s)
-                        </span>
-                      </div>
-
-                      <div className="bg-white/10 rounded-lg p-2 border border-white/10">
-                        <span className="text-[10px] text-emerald-300 uppercase block font-semibold">
-                          2. Produzido Palete
-                        </span>
-                        <strong className="text-sm font-black font-mono text-emerald-400 block mt-0.5">
-                          {pesoLiquidoTotal.toFixed(1)} <span className="text-[10px] font-normal text-slate-300">kg</span>
-                        </strong>
-                        <span className="text-[10px] text-slate-300 block font-mono">
-                          {itens.length} bobina(s)
-                        </span>
-                      </div>
-
-                      <div className="bg-white/10 rounded-lg p-2 border border-white/10">
-                        <span className="text-[10px] text-rose-300 uppercase block font-semibold">
-                          3. Perdas & Aparas
-                        </span>
-                        <strong className="text-sm font-black font-mono text-rose-400 block mt-0.5">
-                          {totalPerdasKg.toFixed(1)} <span className="text-[10px] font-normal text-slate-300">kg</span>
-                        </strong>
-                        <span className="text-[10px] text-slate-300 block font-mono">
-                          Refile + Setup
-                        </span>
-                      </div>
-
-                      <div className={`rounded-lg p-2 border ${
-                        saldoRestanteGeralKg < -0.1
-                          ? "bg-rose-950/70 border-rose-500/60"
-                          : saldoRestanteGeralKg > 0.1
-                          ? "bg-amber-950/50 border-amber-500/40"
-                          : "bg-emerald-950/60 border-emerald-500/40"
-                      }`}>
-                        <span className="text-[10px] uppercase block font-semibold text-slate-300">
-                          4. Saldo Residual
-                        </span>
-                        <strong className={`text-sm font-black font-mono block mt-0.5 ${
-                          saldoRestanteGeralKg < -0.1
-                            ? "text-rose-400"
-                            : saldoRestanteGeralKg > 0.1
-                            ? "text-amber-300"
-                            : "text-emerald-400"
-                        }`}>
-                          {saldoRestanteGeralKg.toFixed(1)} <span className="text-[10px] font-normal text-slate-300">kg</span>
-                        </strong>
-                        <span className="text-[10px] text-slate-300 block">
-                          {saldoRestanteGeralKg > 0.1
-                            ? "Retorna ao pátio"
-                            : saldoRestanteGeralKg < -0.1
-                            ? "Excesso s/ entrada"
-                            : "Consumo 100%"}
-                        </span>
-                      </div>
-                    </div>
-
-                    {/* Barra visual de aproveitamento */}
-                    {totalEntradaMaeKg > 0 && (
-                      <div className="space-y-1">
-                        <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden flex">
-                          <div
-                            className="bg-emerald-500 h-full transition-all duration-300"
-                            style={{
-                              width: `${Math.min(100, Math.max(0, (pesoLiquidoTotal / totalEntradaMaeKg) * 100))}%`,
-                            }}
-                            title={`Produzido: ${pesoLiquidoTotal.toFixed(1)} kg`}
-                          />
-                          <div
-                            className="bg-rose-500 h-full transition-all duration-300"
-                            style={{
-                              width: `${Math.min(100, Math.max(0, (totalPerdasKg / totalEntradaMaeKg) * 100))}%`,
-                            }}
-                            title={`Perdas: ${totalPerdasKg.toFixed(1)} kg`}
-                          />
-                        </div>
-                        <div className="flex justify-between text-[10px] text-slate-400 font-mono">
-                          <span className="flex items-center gap-1">
-                            <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" />
-                            Acabado: {pesoLiquidoTotal.toFixed(1)} kg
-                          </span>
-                          <span className="flex items-center gap-1">
-                            <span className="w-2 h-2 rounded-full bg-rose-500 inline-block" />
-                            Aparas: {totalPerdasKg.toFixed(1)} kg
-                          </span>
-                          <span className="flex items-center gap-1">
-                            <span className="w-2 h-2 rounded-full bg-slate-600 inline-block" />
-                            Residual: {Math.max(0, saldoRestanteGeralKg).toFixed(1)} kg
-                          </span>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* LANÇAMENTO DETALHADO DE PERDAS & APARAS */}
-                  <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-2.5">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <Scissors className="w-4 h-4 text-slate-700" />
-                        <span className="text-xs font-black uppercase text-slate-800">
-                          Apontamento de Perdas & Aparas (kg)
-                        </span>
-                      </div>
-                      {totalPerdasKg > 0 && (
-                        <span className="text-xs font-mono font-bold text-rose-700 bg-rose-50 border border-rose-200 px-2 py-0.5 rounded">
-                          Total Perdas: {totalPerdasKg.toFixed(1)} kg
-                        </span>
-                      )}
-                    </div>
-
-                    <div className="grid grid-cols-3 gap-2.5">
-                      <div>
-                        <label className="text-[10px] font-bold text-slate-600 uppercase block mb-1">
-                          Aparas de Refile
-                        </label>
-                        <div className="relative">
-                          <input
-                            type="text"
-                            inputMode="decimal"
-                            value={perdaRefileKg}
-                            onChange={(e) => setPerdaRefileKg(e.target.value)}
-                            placeholder="0.0"
-                            className="w-full text-center py-1.5 px-2 text-xs font-mono font-bold bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                          />
-                          <span className="absolute right-2 top-2 text-[10px] text-slate-400 font-mono">kg</span>
-                        </div>
-                      </div>
-
-                      <div>
-                        <label className="text-[10px] font-bold text-slate-600 uppercase block mb-1">
-                          Acerto / Setup
-                        </label>
-                        <div className="relative">
-                          <input
-                            type="text"
-                            inputMode="decimal"
-                            value={perdaAcertoKg}
-                            onChange={(e) => setPerdaAcertoKg(e.target.value)}
-                            placeholder="0.0"
-                            className="w-full text-center py-1.5 px-2 text-xs font-mono font-bold bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                          />
-                          <span className="absolute right-2 top-2 text-[10px] text-slate-400 font-mono">kg</span>
-                        </div>
-                      </div>
-
-                      <div>
-                        <label className="text-[10px] font-bold text-slate-600 uppercase block mb-1">
-                          Defeitos / Sucata
-                        </label>
-                        <div className="relative">
-                          <input
-                            type="text"
-                            inputMode="decimal"
-                            value={perdaDefeitoKg}
-                            onChange={(e) => setPerdaDefeitoKg(e.target.value)}
-                            placeholder="0.0"
-                            className="w-full text-center py-1.5 px-2 text-xs font-mono font-bold bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                          />
-                          <span className="absolute right-2 top-2 text-[10px] text-slate-400 font-mono">kg</span>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* BARRA DE BUSCA / BIPAGEM DE QR CODE */}
+                  {/* 1. BARRA DE BUSCA / BIPAGEM DE QR CODE */}
                   <div className="flex gap-2">
                     <div className="relative flex-1">
                       <Barcode className="absolute left-3 top-2.5 w-4 h-4 text-slate-400" />
@@ -2364,95 +2035,80 @@ export function PaleteRomaneioModal({
                       className="px-4 py-2 bg-slate-900 hover:bg-slate-800 active:scale-95 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shrink-0 transition shadow-sm cursor-pointer"
                     >
                       <QrCode className="w-3.5 h-3.5" />
-                      <span>Bipar / Adicionar</span>
+                      <span>Bipar / Buscar</span>
                     </button>
                   </div>
 
-                  {/* BOBINAS MÃE SELECIONADAS EM USO */}
-                  {selectedMotherBobinas.length > 0 && (
-                    <div className="bg-indigo-50/70 border border-indigo-200 rounded-xl p-3 space-y-2">
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-black text-indigo-950 flex items-center gap-1.5">
-                          <CheckCircle2 className="w-3.5 h-3.5 text-indigo-600" />
-                          Bobinas Mãe Vinculadas ao Lote ({selectedMotherBobinas.length}):
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setSelectedMotherBobinaIds([]);
-                            setWipBaixaTotalMap({});
-                          }}
-                          className="text-[11px] text-red-600 hover:text-red-800 font-bold underline cursor-pointer"
-                        >
-                          Limpar Todas
-                        </button>
-                      </div>
+                  {/* 2. CARD DA BOBINA MÃE ATIVA SELECIONADA EM USO */}
+                  {activeMotherBobina && (() => {
+                    const pesoOriginal = Number(activeMotherBobina.peso_liquido_kg) || 0;
+                    const pesoConsumido = pesoLiquidoTotal;
+                    const saldoRestante = Math.max(0, pesoOriginal - pesoConsumido);
 
-                      <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
-                        {selectedMotherBobinas.map((b) => {
-                          const isBaixaTotal = Boolean(wipBaixaTotalMap[b.id]);
-                          return (
-                            <div
-                              key={b.id}
-                              className="bg-white p-2 rounded-lg border border-indigo-100 flex items-center justify-between text-xs font-mono"
-                            >
-                              <div className="flex items-center gap-2">
-                                <span className="font-bold text-slate-800">{b.numero_bobina}</span>
-                                <span className="text-[10px] bg-indigo-100 text-indigo-700 px-1.5 py-0.2 rounded font-sans font-semibold">
-                                  {Number(b.peso_liquido_kg).toFixed(1)} kg
-                                </span>
-                              </div>
-
-                              <div className="flex items-center gap-3">
-                                <label className="flex items-center gap-1.5 cursor-pointer text-[11px] font-sans text-slate-700 select-none">
-                                  <input
-                                    type="checkbox"
-                                    checked={isBaixaTotal}
-                                    onChange={(e) =>
-                                      setWipBaixaTotalMap((m) => ({
-                                        ...m,
-                                        [b.id]: e.target.checked,
-                                      }))
-                                    }
-                                    className="w-3.5 h-3.5 text-indigo-600 accent-indigo-600 rounded cursor-pointer"
-                                  />
-                                  <span>Baixa Total</span>
-                                </label>
-                                <button
-                                  type="button"
-                                  onClick={() => handleToggleMotherBobina(b.id)}
-                                  className="text-slate-400 hover:text-red-600 font-bold p-0.5 cursor-pointer"
-                                  title="Remover bobina"
-                                >
-                                  <X className="w-3.5 h-3.5" />
-                                </button>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* LISTA DE BOBINAS DISPONÍVEIS COM ABAS DE ESCOPO E MULTI-SELEÇÃO */}
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between flex-wrap gap-2 pt-0.5">
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs text-slate-700 font-bold block">
-                          Lista de Bobinas Disponíveis ({availableMotherBobinas.length}):
-                        </span>
-                        {opBobinas.length > 0 && (
+                    return (
+                      <div className="bg-gradient-to-r from-indigo-50 to-blue-50 border-2 border-indigo-500/80 rounded-xl p-3 space-y-2.5 shadow-xs">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
+                            <span className="text-xs font-black text-indigo-950 font-mono tracking-wide">
+                              BOBINA EM USO: {activeMotherBobina.numero_bobina}
+                            </span>
+                          </div>
                           <button
                             type="button"
-                            onClick={handleToggleSelectAllOpBobinas}
-                            className="text-[11px] text-indigo-700 hover:text-indigo-900 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 px-2 py-0.5 rounded font-bold transition cursor-pointer"
+                            onClick={() => setSelectedMotherBobinaId(null)}
+                            className="text-[11px] text-red-600 hover:text-red-800 font-bold underline cursor-pointer"
                           >
-                            {opBobinas.every((b) => selectedMotherBobinaIds.includes(b.id))
-                              ? "Desmarcar Todas da OP"
-                              : `Selecionar Todas da OP (${opBobinas.length})`}
+                            Desmarcar / Trocar
                           </button>
-                        )}
+                        </div>
+
+                        {/* Grid de balanço em tempo real */}
+                        <div className="grid grid-cols-3 gap-2 bg-white/90 p-2 rounded-lg border border-indigo-100 text-center font-mono">
+                          <div>
+                            <span className="text-[10px] text-slate-500 uppercase block font-sans">Saldo Entrada</span>
+                            <strong className="text-xs text-slate-800">{pesoOriginal.toFixed(1)} kg</strong>
+                          </div>
+                          <div>
+                            <span className="text-[10px] text-indigo-600 uppercase block font-sans">Apontado Palete</span>
+                            <strong className="text-xs text-indigo-900">{pesoConsumido.toFixed(1)} kg</strong>
+                          </div>
+                          <div>
+                            <span className="text-[10px] text-slate-500 uppercase block font-sans">Saldo Restante</span>
+                            <strong className={`text-xs ${saldoRestante > 0 ? "text-emerald-700" : "text-slate-400"}`}>
+                              {saldoRestante.toFixed(1)} kg
+                            </strong>
+                          </div>
+                        </div>
+
+                        {/* Opção de baixa total ou devolução do residual */}
+                        <div className="flex items-center justify-between text-[11px] pt-0.5">
+                          <label className="flex items-center gap-2 cursor-pointer font-medium text-slate-700 select-none">
+                            <input
+                              type="checkbox"
+                              checked={wipBaixaTotal || saldoRestante <= 0.1}
+                              disabled={saldoRestante <= 0.1}
+                              onChange={(e) => setWipBaixaTotal(e.target.checked)}
+                              className="w-4 h-4 text-indigo-600 rounded accent-indigo-600"
+                            />
+                            <span>Baixa total (bobina mãe 100% finalizada)</span>
+                          </label>
+                          {!wipBaixaTotal && saldoRestante > 0.1 && (
+                            <span className="text-emerald-700 font-bold">
+                              ✓ Saldo residual de {saldoRestante.toFixed(1)} kg voltará ao pátio
+                            </span>
+                          )}
+                        </div>
                       </div>
+                    );
+                  })()}
+
+                  {/* 3. LISTA DE BOBINAS DISPONÍVEIS COM ABAS DE ESCOPO (DESTA OP, SETOR, TODO O PÁTIO) */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between flex-wrap gap-2 pt-0.5">
+                      <span className="text-xs text-slate-700 font-bold block">
+                        Lista de Bobinas Disponíveis ({availableMotherBobinas.length}):
+                      </span>
 
                       {/* ABAS DE ESCOPO / FILTRO RÁPIDO */}
                       <div className="flex items-center gap-1 bg-slate-100 p-0.5 rounded-lg border border-slate-200">
@@ -2527,11 +2183,17 @@ export function PaleteRomaneioModal({
                     ) : (
                       <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
                         {availableMotherBobinas.map((b) => {
-                          const isSelected = selectedMotherBobinaIds.includes(b.id);
+                          const isSelected = selectedMotherBobinaId === b.id;
                           return (
                             <div
                               key={b.id}
-                              onClick={() => handleToggleMotherBobina(b.id)}
+                              onClick={() => {
+                                setSelectedMotherBobinaId(isSelected ? null : b.id);
+                                if (!isSelected) {
+                                  setSuccessToast(`Bobina mãe ${b.numero_bobina} selecionada para uso.`);
+                                  setTimeout(() => setSuccessToast(""), 3000);
+                                }
+                              }}
                               className={`p-2.5 rounded-xl border transition-all cursor-pointer flex items-center justify-between ${
                                 isSelected
                                   ? "bg-indigo-50 border-indigo-500 ring-2 ring-indigo-300 shadow-xs"
@@ -2540,17 +2202,17 @@ export function PaleteRomaneioModal({
                             >
                               <div className="flex items-center gap-3">
                                 <input
-                                  type="checkbox"
+                                  type="radio"
                                   checked={isSelected}
                                   onChange={() => {}}
-                                  className="w-4 h-4 text-indigo-600 accent-indigo-600 rounded cursor-pointer pointer-events-none"
+                                  className="w-4 h-4 text-indigo-600 accent-indigo-600 cursor-pointer pointer-events-none"
                                 />
                                 <div>
                                   <div className="font-mono font-bold text-xs text-slate-900 flex items-center gap-1.5 flex-wrap">
                                     <span>{b.numero_bobina}</span>
                                     {isSelected && (
                                       <span className="text-[9px] bg-indigo-600 text-white px-1.5 py-0.2 rounded font-sans uppercase font-bold">
-                                        CONSUMINDO
+                                        EM USO
                                       </span>
                                     )}
                                     {b.setor_destino && (
@@ -2582,7 +2244,7 @@ export function PaleteRomaneioModal({
                                   {Number(b.peso_liquido_kg).toFixed(1)} <span className="text-[10px] font-normal text-slate-500 font-sans">kg</span>
                                 </div>
                                 <span className={`text-[10px] font-bold ${isSelected ? "text-indigo-700" : "text-slate-400"}`}>
-                                  {isSelected ? "Selecionada" : "Clique p/ marcar"}
+                                  {isSelected ? "Selecionada" : "Clique para usar"}
                                 </span>
                               </div>
                             </div>
