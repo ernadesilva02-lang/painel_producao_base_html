@@ -94,12 +94,6 @@ export type Production = {
   qtdUnidades?: string;       // Qtd produzida em unidades (Setor de Corte e Solda)
   bobinasWipConsumidas?: string[];
   bobinaWipOrigem?: string;
-  perdaRefileKg?: number;
-  perdaAcertoKg?: number;
-  perdaDefeitoKg?: number;
-  perdasAparasTotalKg?: number;
-  rendimentoPercentual?: number;
-  totalEntradaWipKg?: number;
   _key?: string;
   _updatedAt?: string;
 };
@@ -291,33 +285,10 @@ export type PaleteRomaneio = {
   observacoes?: string;
   bobinaMaeOrigem?: string;
   bobinasMaeConsumidas?: string[];
-  bobinasMaeConsumidasDetalhe?: ItemBobinaMaeConsumida[];
-  perdasAparas?: DetalhePerdasAparas;
-  totalEntradaBobinasMaeKg?: number;
-  rendimentoPercentual?: number;
   idApontamentoProducao?: string; // id do record de produção gerado no fechamento
   created_at?: string;
   updated_at?: string;
   fechado_em?: string;
   _key?: string;
   _updatedAt?: string;
-};
-
-export type ItemBobinaMaeConsumida = {
-  id: string;
-  numeroBobina: string;
-  numero_bobina?: string;
-  pesoEntradaKg: number;
-  pesoOriginalKg?: number;
-  pesoConsumidoKg?: number;
-  setorOrigem?: string;
-  baixaTotal: boolean;
-};
-
-export type DetalhePerdasAparas = {
-  refileKg: number;
-  acertoKg: number;
-  defeitoKg: number;
-  totalKg: number;
-  totalPerdasKg?: number;
 };
