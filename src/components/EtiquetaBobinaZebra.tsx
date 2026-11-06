@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from "react";
-import QRCode from "qrcode";
+import qrCodeEncoder from "../utils/qrStandalone.js";
 import {
   Printer,
   X,
@@ -73,10 +73,12 @@ export interface EtiquetaZebraData {
  * - Margem de respiro / Quiet Zone branca de 2 módulos (obrigatória para câmeras de celular e leitores Zebra)
  * - Fundo branco puro (#ffffff) com shape-rendering crispEdges para contraste máximo
  */
+
+
 export function generateQrCodeSvg(text: string, sizePx: number = 66): string {
   try {
     const clean = (text || "FORPACK").trim();
-    const qr = QRCode.create(clean, { errorCorrectionLevel: "M" });
+    const qr = qrCodeEncoder.create(clean, { errorCorrectionLevel: "M" });
     const size = qr.modules.size;
     const margin = 2; // Margem branca de respiro (quiet zone) indispensável para leitura por câmera
     const total = size + margin * 2;
